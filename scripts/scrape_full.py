@@ -35,14 +35,24 @@ def get_students(page: Page) -> list:
     students_list = soup.select_one("#students-list")
     if students_list:
         for a in students_list.select("a"):
-            text = a.get_text(strip=True)
+            bold = a.find("b")
+            text = bold.get_text(strip=True) if bold else a.get_text(strip=True)
+            # Extract student number from "Student Number: XXXXXXXXXX"
+            full_text = a.get_text(strip=True)
+            sn_match = re.search(r"Student Number:\s*(\d+)", full_text)
+            student_number = sn_match.group(1) if sn_match else ""
             href = a.get("href", "")
             # Extract student ID from javascript:switchStudent(12345)
             match = re.search(r"switchStudent\((\d+)\)", href)
             if match:
                 student_id = match.group(1)
                 is_selected = "selected" in a.find_parent("li").get("class", [])
-                students.append({"name": text, "id": student_id, "selected": is_selected})
+                students.append({
+                    "name": text,
+                    "id": student_id,
+                    "student_number": student_number,
+                    "selected": is_selected,
+                })
     return students
 
 
@@ -420,12 +430,82 @@ def scrape_schedule(page: Page) -> list:
     return courses
 
 
-def run_full_scrape(headless: bool = False, student_name: str | None = None):
+def _scrape_current_student(page, all_data: dict):
+    """Scrape all data for the currently selected student and merge into all_data."""
+    home_data = scrape_home_grades(page)
+    current_student = home_data.get("current_student", {})
+    student_name_display = current_student.get("name", "Unknown")
+    print(f"\nScraping data for: {student_name_display}")
+
+    all_data.setdefault("students", [])
+    all_data.setdefault("courses", [])
+    all_data.setdefault("assignments", [])
+    all_data.setdefault("schedule", [])
+    all_data.setdefault("attendance", {})
+
+    # Merge student list (only once, they're the same across switches)
+    if not all_data["students"]:
+        all_data["students"] = home_data["students"]
+
+    all_data["current_student"] = current_student
+    all_data["courses"].extend(home_data["courses"])
+
+    print(f"\nFound {len(home_data['courses'])} courses")
+    for c in home_data["courses"]:
+        print(f"  {c['course_name']}: Q1={c['q1']}, Q2={c['q2']}")
+
+    # Scrape individual course assignments
+    print("\n" + "=" * 40)
+    print("Scraping course assignments...")
+    student_assignments = []
+    for link_info in home_data["course_links"][:5]:
+        try:
+            assignments = scrape_course_assignments(
+                page, link_info["link"], link_info["course_name"]
+            )
+            student_assignments.extend(assignments)
+        except Exception as e:
+            print(f"  Error scraping {link_info['course_name']}: {e}")
+
+    # Also try Q2 assignments page
+    print("\n" + "=" * 40)
+    q2_assignments = scrape_assignments_q2(page)
+    student_assignments.extend(q2_assignments)
+
+    all_data["assignments"].extend(student_assignments)
+    print(f"\nAssignments collected for {student_name_display}: {len(student_assignments)}")
+
+    missing = [a for a in student_assignments if a.get("status") == "Missing"]
+    print(f"Missing assignments: {len(missing)}")
+    for a in missing:
+        print(
+            f"  - {a.get('assignment_name', a.get('assignment', 'Unknown'))} ({a.get('course', '')})"
+        )
+
+    # Scrape schedule
+    print("\n" + "=" * 40)
+    schedule = scrape_schedule(page)
+    if isinstance(all_data["schedule"], list):
+        all_data["schedule"].extend(schedule if isinstance(schedule, list) else [schedule])
+    else:
+        all_data["schedule"] = schedule
+
+    # Scrape attendance
+    print("\n" + "=" * 40)
+    attendance = scrape_attendance_dashboard(page)
+    # Store per-student attendance; last student's attendance wins for top-level
+    all_data["attendance"] = attendance
+
+    return home_data
+
+
+def run_full_scrape(headless: bool = False, student_name: str | None = None, all_students: bool = False):
     """Run full scraping operation.
 
     Args:
         headless: Run browser in headless mode (no visible window)
-        student_name: Optional student name to filter scraping to (not yet implemented)
+        student_name: Optional student name to filter scraping to
+        all_students: If True, iterate through all students on the account
     """
     print("=" * 60)
     print("PowerSchool Full Scrape")
@@ -450,11 +530,28 @@ def run_full_scrape(headless: bool = False, student_name: str | None = None):
             browser.close()
             sys.exit(1)
 
-        # Scrape home page grades (this also navigates to home page)
-        home_data = scrape_home_grades(page)
+        if all_students:
+            # First scrape to discover available students
+            home_data = scrape_home_grades(page)
+            students = home_data.get("students", [])
+            print(f"\nFound {len(students)} students on account")
+            for s in students:
+                print(f"  - {s['name']} (ID: {s['id']})")
 
-        # If student_name is provided, switch to that student and re-scrape
-        if student_name:
+            # Scrape default student first
+            _scrape_current_student(page, all_data)
+
+            # Switch to and scrape each other student
+            current_id = home_data.get("current_student", {}).get("id")
+            for student in students:
+                if student["id"] != current_id:
+                    print(f"\n{'=' * 60}")
+                    print(f"Switching to student: {student['name']}")
+                    switch_student(page, student["id"])
+                    _scrape_current_student(page, all_data)
+        elif student_name:
+            # Scrape home to find student list, then switch
+            home_data = scrape_home_grades(page)
             students = home_data.get("students", [])
             matching_student = None
             for student in students:
@@ -465,57 +562,14 @@ def run_full_scrape(headless: bool = False, student_name: str | None = None):
             if matching_student:
                 print(f"Switching to student: {matching_student['name']}")
                 switch_student(page, matching_student["id"])
-                # Re-scrape after switching student
-                home_data = scrape_home_grades(page)
             else:
                 print(f"WARNING: Student '{student_name}' not found. Available students:")
                 for student in students:
                     print(f"  - {student['name']}")
                 print("Continuing with default student...")
-        all_data["students"] = home_data["students"]
-        all_data["current_student"] = home_data["current_student"]
-        all_data["courses"] = home_data["courses"]
-
-        print(f"\nFound {len(home_data['courses'])} courses")
-        for c in home_data["courses"]:
-            print(f"  {c['course_name']}: Q1={c['q1']}, Q2={c['q2']}")
-
-        # Scrape individual course assignments
-        print("\n" + "=" * 40)
-        print("Scraping course assignments...")
-        all_assignments = []
-        for link_info in home_data["course_links"][:5]:  # Limit to first 5 for speed
-            try:
-                assignments = scrape_course_assignments(
-                    page, link_info["link"], link_info["course_name"]
-                )
-                all_assignments.extend(assignments)
-            except Exception as e:
-                print(f"  Error scraping {link_info['course_name']}: {e}")
-
-        # Also try Q2 assignments page
-        print("\n" + "=" * 40)
-        q2_assignments = scrape_assignments_q2(page)
-        all_assignments.extend(q2_assignments)
-
-        all_data["assignments"] = all_assignments
-        print(f"\nTotal assignments collected: {len(all_assignments)}")
-
-        # Find missing assignments
-        missing = [a for a in all_assignments if a.get("status") == "Missing"]
-        print(f"Missing assignments: {len(missing)}")
-        for a in missing:
-            print(
-                f"  - {a.get('assignment_name', a.get('assignment', 'Unknown'))} ({a.get('course', '')})"
-            )
-
-        # Scrape schedule
-        print("\n" + "=" * 40)
-        all_data["schedule"] = scrape_schedule(page)
-
-        # Scrape attendance
-        print("\n" + "=" * 40)
-        all_data["attendance"] = scrape_attendance_dashboard(page)
+            _scrape_current_student(page, all_data)
+        else:
+            _scrape_current_student(page, all_data)
 
         browser.close()
 

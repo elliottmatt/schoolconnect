@@ -4,6 +4,7 @@
 Commands:
     init-db     Create or reset the database
     sync        Sync data from PowerSchool (runs scraper)
+    students    List students on the account
     missing     Show missing assignments
     grades      Show current grades
     report      Generate weekly report
@@ -273,6 +274,76 @@ def serve_mcp():
         console.print("\n[yellow]Server stopped.[/yellow]")
     except Exception as e:
         console.print(f"[red]Server error: {e}[/red]")
+
+
+@cli.command()
+@click.option("--live", is_flag=True, help="Query PowerSchool directly (opens browser)")
+@click.option("--headless", is_flag=True, help="Run browser in headless mode (with --live)")
+def students(live: bool, headless: bool):
+    """List students on the account.
+
+    By default, shows students from the local database. Use --live to
+    query PowerSchool directly (requires browser login).
+    """
+    if live:
+        try:
+            from playwright.sync_api import sync_playwright
+
+            from scripts.scrape_full import get_students, login
+
+            console.print("[blue]Logging into PowerSchool to fetch student list...[/blue]")
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=headless, slow_mo=200)
+                context = browser.new_context(viewport={"width": 1280, "height": 900})
+                page = context.new_page()
+
+                if not login(page):
+                    console.print("[red]Login failed.[/red]")
+                    browser.close()
+                    return
+
+                student_list = get_students(page)
+                browser.close()
+
+            if not student_list:
+                console.print("[yellow]No students found on account.[/yellow]")
+                return
+
+            table = Table(title="Students on PowerSchool Account")
+            table.add_column("Name")
+            table.add_column("Student Number")
+            table.add_column("ID")
+            table.add_column("Selected", justify="center")
+
+            for s in student_list:
+                selected = "✓" if s.get("selected") else ""
+                table.add_row(s["name"], s.get("student_number", ""), s["id"], f"[green]{selected}[/green]")
+
+            console.print(table)
+
+        except ImportError as e:
+            console.print(f"[red]Error: Scraper dependencies not available. {e}[/red]")
+        except Exception as e:
+            console.print(f"[red]Failed to fetch students: {e}[/red]")
+    else:
+        repo = Repository()
+        student_list = repo.get_students()
+
+        if not student_list:
+            console.print("[yellow]No students in database. Run 'powerschool sync' first.[/yellow]")
+            return
+
+        table = Table(title="Students in Database")
+        table.add_column("Name")
+        table.add_column("Grade")
+        table.add_column("School")
+
+        for s in student_list:
+            name = f"{s['first_name']} {s.get('last_name', '')}".strip()
+            table.add_row(name, str(s.get("grade_level", "")), s.get("school_name", ""))
+
+        console.print(table)
 
 
 @cli.command()
