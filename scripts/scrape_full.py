@@ -4,6 +4,7 @@ Full PowerSchool scraper that extracts all data including course-level assignmen
 """
 
 import json
+import os
 import re
 import sys
 from datetime import datetime
@@ -24,15 +25,55 @@ from src.scraper.auth import get_base_url, get_credentials, login
 BASE_URL = get_base_url()
 RAW_HTML_DIR = Path(__file__).parent.parent / "raw_html"
 RAW_HTML_DIR.mkdir(exist_ok=True)
+SCRAPER_DEBUG = os.getenv("SCRAPER_DEBUG", "").lower() in ("1", "true", "yes")
+
+_debug_counter = 0
+
+
+def _dump_html(page: Page, label: str):
+    """Dump current page HTML and screenshot to debug dir for troubleshooting.
+
+    Enable by setting SCRAPER_DEBUG=1 in .env or environment.
+    """
+    if not SCRAPER_DEBUG:
+        return
+    global _debug_counter
+    _debug_counter += 1
+    debug_dir = RAW_HTML_DIR / "debug"
+    debug_dir.mkdir(exist_ok=True)
+    filename = f"{_debug_counter:02d}_{label}.html"
+    filepath = debug_dir / filename
+    html = page.content()
+    filepath.write_text(html)
+    # Also take a screenshot
+    screenshot_path = debug_dir / f"{_debug_counter:02d}_{label}.png"
+    try:
+        page.screenshot(path=str(screenshot_path))
+    except Exception:
+        pass
+    print(f"  [debug] Saved {filepath} ({len(html)} bytes)")
 
 
 def get_students(page: Page) -> list:
     """Get list of students from the page."""
+    # Wait for the student switcher to appear (it loads dynamically)
+    try:
+        page.wait_for_selector("#students-list", timeout=5000)
+        if SCRAPER_DEBUG:
+            print("  [debug] #students-list found in DOM")
+    except Exception:
+        if SCRAPER_DEBUG:
+            print("  [debug] #students-list NOT found after 5s")
+
+    _dump_html(page, "get_students")
+
     html = page.content()
     soup = BeautifulSoup(html, "lxml")
 
     students = []
     students_list = soup.select_one("#students-list")
+    if SCRAPER_DEBUG:
+        print(f"  [debug] #students-list element: {'found' if students_list else 'missing'}")
     if students_list:
         for a in students_list.select("a"):
             bold = a.find("b")
@@ -56,26 +97,80 @@ def get_students(page: Page) -> list:
     return students
 
 
+def _ensure_logged_in(page: Page):
+    """Check if the session is still active, re-login if needed."""
+    if "Sign In" in page.title() or "/public/" in page.url:
+        print("  Session expired, re-logging in...")
+        if not login(page):
+            raise RuntimeError("Re-login failed after session expiry")
+
+
 def switch_student(page: Page, student_id: str):
     """Switch to a different student."""
     print(f"Switching to student ID: {student_id}")
+    # Navigate to home page to ensure switchStudent() JS is available
+    page.goto(f"{BASE_URL}/guardian/home.html", wait_until="networkidle")
+    _ensure_logged_in(page)
+    try:
+        page.wait_for_selector("table.linkDescList", timeout=10000)
+    except Exception:
+        page.wait_for_timeout(5000)
+    # Wait for the switchStudent function to be defined
+    try:
+        page.wait_for_function("typeof switchStudent === 'function'", timeout=5000)
+    except Exception:
+        if SCRAPER_DEBUG:
+            print("  [debug] switchStudent function not found, retrying page load")
+        page.reload(wait_until="networkidle")
+        page.wait_for_timeout(3000)
+    _dump_html(page, f"before_switch_{student_id}")
     page.evaluate(f"switchStudent({student_id})")
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(2000)
+    _dump_html(page, f"after_switch_{student_id}")
 
 
 def scrape_home_grades(page: Page) -> dict:
     """Scrape grades from home page."""
     print("Scraping home page grades...")
+    _dump_html(page, "before_goto_home")
+    if SCRAPER_DEBUG:
+        print(f"  [debug] Current URL: {page.url}")
     page.goto(f"{BASE_URL}/guardian/home.html", wait_until="networkidle")
-    page.wait_for_timeout(2000)
+    _ensure_logged_in(page)
+    if SCRAPER_DEBUG:
+        print(f"  [debug] After goto URL: {page.url}")
+    _dump_html(page, "after_goto_home_networkidle")
+    # Wait for the grades table to render (JS-loaded content)
+    try:
+        page.wait_for_selector("table.linkDescList", timeout=10000)
+        if SCRAPER_DEBUG:
+            print("  [debug] Grades table found")
+    except Exception:
+        if SCRAPER_DEBUG:
+            print("  [debug] Grades table NOT found after 10s, falling back to 5s wait")
+        page.wait_for_timeout(5000)
+
+    _dump_html(page, "after_wait_for_content")
 
     html = page.content()
     soup = BeautifulSoup(html, "lxml")
 
+    # Get school name from print-school div
+    school_div = soup.select_one("#print-school")
+    school_name = ""
+    if school_div:
+        school_span = school_div.select_one("span")
+        school_name = school_span.get_text(strip=True) if school_span else school_div.get_text(strip=True)
+
     # Get students
     students = get_students(page)
+    print(f"  Found {len(students)} student(s) in switcher")
     current_student = next((s for s in students if s.get("selected")), None)
+
+    # Add school name to each student
+    for s in students:
+        s["school_name"] = school_name
 
     data = {
         "students": students,
@@ -88,217 +183,186 @@ def scrape_home_grades(page: Page) -> dict:
     tables = soup.select("table.linkDescList.grid")
     if tables:
         table = tables[0]
-        rows = table.select("tr")[2:]  # Skip header rows
+        all_rows = table.select("tr")
 
-        for row in rows:
+        # Build column index map from first header row
+        col_map = {}
+        col_idx = 0
+        if all_rows:
+            for th in all_rows[0].select("th"):
+                name = th.get_text(strip=True)
+                colspan = int(th.get("colspan", 1))
+                col_map[name] = col_idx
+                col_idx += colspan
+        if SCRAPER_DEBUG:
+            print(f"  [debug] Grade table columns: {col_map}")
+
+        def get_col(name):
+            return col_map.get(name)
+
+        # Skip header rows
+        data_rows = all_rows[2:]
+
+        for row in data_rows:
             cells = row.select("td")
-            if len(cells) >= 15:
-                expression = cells[0].get_text(strip=True)
-                course_cell = cells[11]
-                course_text = course_cell.get_text(strip=True)
+            if len(cells) < 12:
+                continue
 
-                # Parse course name, teacher, and email
-                teacher_email = None
-                email_link = course_cell.select_one("a[href^='mailto:']")
-                if email_link:
-                    teacher_email = email_link.get("href", "").replace("mailto:", "")
+            expression = cells[0].get_text(strip=True)
 
-                if "Email" in course_text:
-                    course_name = course_text.split("Email")[0].strip()
-                    teacher_info = course_text.split("Email")[1].strip()
-                    teacher_parts = teacher_info.split("-")
-                    teacher_name = teacher_parts[0].strip() if teacher_parts else ""
-                    room = ""
-                    if len(teacher_parts) > 1:
-                        room_match = re.search(r"Rm:(\S+)", teacher_parts[-1])
-                        if room_match:
-                            room = room_match.group(1)
-                else:
-                    course_name = course_text
-                    teacher_name = ""
-                    room = ""
+            course_idx = get_col("Course")
+            if course_idx is None:
+                continue
+            course_cell = cells[course_idx]
+            course_text = course_cell.get_text(strip=True)
 
-                # Extract grades
-                def clean_grade(cell_idx):
-                    if len(cells) > cell_idx:
-                        grade = cells[cell_idx].get_text(strip=True)
-                        if grade in ["[ i ]", "Not available", "-"]:
-                            return ""
-                        return grade
-                    return ""
+            # Parse course name, teacher, and email
+            teacher_email = None
+            email_link = course_cell.select_one("a[href^='mailto:']")
+            if email_link:
+                teacher_email = email_link.get("href", "").replace("mailto:", "")
 
-                q1 = clean_grade(14)
-                q2 = clean_grade(15)
-                s1 = clean_grade(16)
-                q3 = clean_grade(17) if len(cells) > 17 else ""
-                q4 = clean_grade(18) if len(cells) > 18 else ""
-                s2 = clean_grade(19) if len(cells) > 19 else ""
+            if "Email" in course_text:
+                course_name = course_text.split("Email")[0].strip()
+                teacher_info = course_text.split("Email")[1].strip()
+                teacher_parts = teacher_info.split("-")
+                teacher_name = teacher_parts[0].strip() if teacher_parts else ""
+                room = ""
+                if len(teacher_parts) > 1:
+                    room_match = re.search(r"Rm:(\S+)", teacher_parts[-1])
+                    if room_match:
+                        room = room_match.group(1)
+            else:
+                course_name = course_text
+                teacher_name = ""
+                room = ""
 
-                # Get absences/tardies (last two columns)
-                absences = cells[-2].get_text(strip=True) if len(cells) >= 2 else "0"
-                tardies = cells[-1].get_text(strip=True) if len(cells) >= 1 else "0"
+            # Extract grades using column map
+            def clean_grade(col_name):
+                idx = get_col(col_name)
+                if idx is not None and idx < len(cells):
+                    grade = cells[idx].get_text(strip=True)
+                    if grade in ["[ i ]", "Not available", "-", ""]:
+                        return ""
+                    return grade
+                return ""
 
-                # Get course link
-                q1_cell = cells[14] if len(cells) > 14 else None
-                course_link = None
-                if q1_cell:
-                    link = q1_cell.select_one("a")
+            q1 = clean_grade("Q1")
+            q2 = clean_grade("Q2")
+            f1 = clean_grade("F1")
+            q3 = clean_grade("Q3")
+            q4 = clean_grade("Q4")
+            f2 = clean_grade("F2")
+
+            absences = clean_grade("Absences") or "0"
+            tardies = clean_grade("Tardies") or "0"
+
+            # Collect ALL term links for this course (one per grade column)
+            course_term_links = []
+            for col_name in ["Q1", "Q2", "F1", "Q3", "Q4", "F2"]:
+                idx = get_col(col_name)
+                if idx is not None and idx < len(cells):
+                    link = cells[idx].select_one("a")
                     if link:
-                        course_link = link.get("href", "")
+                        href = link.get("href", "")
+                        if href:
+                            course_term_links.append({"course_name": course_name, "term": col_name, "link": href})
 
-                course_data = {
-                    "expression": expression,
-                    "course_name": course_name,
-                    "teacher_name": teacher_name,
-                    "teacher_email": teacher_email,
-                    "room": room,
-                    "q1": q1,
-                    "q2": q2,
-                    "s1": s1,
-                    "q3": q3,
-                    "q4": q4,
-                    "s2": s2,
-                    "absences": absences,
-                    "tardies": tardies,
-                }
-                data["courses"].append(course_data)
+            course_data = {
+                "expression": expression,
+                "course_name": course_name,
+                "teacher_name": teacher_name,
+                "teacher_email": teacher_email,
+                "room": room,
+                "q1": q1,
+                "q2": q2,
+                "f1": f1,
+                "q3": q3,
+                "q4": q4,
+                "f2": f2,
+                "absences": absences,
+                "tardies": tardies,
+            }
+            data["courses"].append(course_data)
+            data["course_links"].extend(course_term_links)
 
-                if course_link:
-                    data["course_links"].append({"course_name": course_name, "link": course_link})
+    # Infer grade level from course names (e.g., "Gr 7", "Gr 8")
+    grade_level = None
+    for course in data["courses"]:
+        grade_match = re.search(r"Gr\s*(\d+)", course["course_name"])
+        if grade_match:
+            grade_level = grade_match.group(1)
+            break
+    if grade_level:
+        for s in data["students"]:
+            s["grade_level"] = grade_level
+        if data["current_student"]:
+            data["current_student"]["grade_level"] = grade_level
 
     (RAW_HTML_DIR / "home.html").write_text(html)
     return data
 
 
-def scrape_course_assignments(page: Page, course_link: str, course_name: str) -> list:
-    """Scrape assignments from a specific course page."""
-    print(f"  Scraping {course_name}...")
+def scrape_course_assignments(page: Page, course_link: str, course_name: str, term: str = "") -> list:
+    """Scrape assignments from a specific course term page using #scoreTable."""
+    print(f"  Scraping {course_name} [{term}]...")
     url = f"{BASE_URL}/guardian/{course_link}"
     page.goto(url, wait_until="networkidle")
+    _ensure_logged_in(page)
     page.wait_for_timeout(1500)
+    _dump_html(page, f"course_{course_name[:15].replace(' ', '_')}_{term}")
 
     html = page.content()
     soup = BeautifulSoup(html, "lxml")
 
     assignments = []
 
-    # Find assignments table
-    table = soup.select_one("table.linkDescList")
-    if table:
-        rows = table.select("tr")
-        headers = []
+    # #scoreTable columns (14 cells):
+    # 0=Due Date, 1=Category, 2=Assignment, 3=collected, 4=late, 5=missing,
+    # 6=exempt, 7=absent, 8=incomplete, 9=excluded, 10=Score, 11=%, 12=Grade, 13=Comments
+    score_table = soup.select_one("#scoreTable")
+    if not score_table:
+        if SCRAPER_DEBUG:
+            all_tables = soup.select("table")
+            print(f"  [debug] No #scoreTable for {course_name}. Tables: {[t.get('id', str(t.get('class','?'))) for t in all_tables[:5]]}")
+        return assignments
 
-        for row in rows:
-            header_cells = row.select("th")
-            if header_cells:
-                headers = [h.get_text(strip=True).lower() for h in header_cells]
-                continue
+    rows = score_table.select("tr")
+    if SCRAPER_DEBUG:
+        print(f"  [debug] #scoreTable has {len(rows)} rows for {course_name} [{term}]")
 
-            cells = row.select("td")
-            if len(cells) >= 4:
-                assignment = {
-                    "course": course_name,
-                }
+    for row in rows[1:]:  # Skip header row
+        cells = row.select("td")
+        if len(cells) < 13:
+            continue
 
-                for i, cell in enumerate(cells):
-                    text = cell.get_text(strip=True)
-                    if i < len(headers):
-                        key = headers[i].replace(" ", "_")
-                        assignment[key] = text
+        due_date = cells[0].get_text(strip=True)
+        category = cells[1].get_text(strip=True)
+        assignment_name = cells[2].get_text(strip=True)
+        # cells 3-9 are Angular-rendered flag columns (not readable from static HTML)
+        score = cells[10].get_text(strip=True)
+        percent = cells[11].get_text(strip=True).rstrip("%")
+        letter_grade = cells[12].get_text(strip=True)
 
-                # Determine status from flags/codes
-                row_html = str(row)
-                if "missing" in row_html.lower() or "M" in assignment.get("flags", ""):
-                    assignment["status"] = "Missing"
-                elif "late" in row_html.lower() or "L" in assignment.get("flags", ""):
-                    assignment["status"] = "Late"
-                elif "collected" in row_html.lower():
-                    assignment["status"] = "Collected"
-                else:
-                    assignment["status"] = "Submitted"
+        if not assignment_name:
+            continue
 
-                if assignment.get("assignment") or assignment.get("name"):
-                    assignments.append(assignment)
+        # Score of "--/XX" or just "--" means not submitted (missing)
+        status = "Missing" if score.startswith("--") else "Submitted"
 
-    return assignments
+        assignments.append({
+            "course": course_name,
+            "term": term,
+            "due_date": due_date,
+            "category": category,
+            "assignment_name": assignment_name,
+            "score": score,
+            "percent": percent,
+            "letter_grade": letter_grade,
+            "status": status,
+        })
 
-
-def scrape_assignments_q2(page: Page) -> list:
-    """Scrape assignments page with Q2 term selected."""
-    print("Scraping assignments page (Q2 term)...")
-    page.goto(f"{BASE_URL}/guardian/classassignments.html", wait_until="networkidle")
-    page.wait_for_timeout(2000)
-
-    # Try to select Q2 term
-    try:
-        # Look for term filter and click Q2
-        page.click("text=Q2", timeout=3000)
-        page.wait_for_timeout(2000)
-    except Exception:
-        print("  Could not click Q2 filter, trying dropdown...")
-        try:
-            # Try to find a term dropdown
-            selects = page.locator("select").all()
-            for select in selects:
-                options = select.locator("option").all()
-                for opt in options:
-                    text = opt.inner_text()
-                    if "Q2" in text:
-                        select.select_option(label=text)
-                        page.wait_for_timeout(2000)
-                        break
-        except Exception as e:
-            print(f"  Could not select Q2: {e}")
-
-    html = page.content()
-    soup = BeautifulSoup(html, "lxml")
-
-    assignments = []
-    table = soup.select_one("#results")
-
-    if table:
-        rows = table.select("tbody tr, tr")
-        for row in rows:
-            cells = row.select("td")
-            if len(cells) >= 10:
-                teacher = cells[0].get_text(strip=True)
-                course = cells[1].get_text(strip=True)
-                term = cells[2].get_text(strip=True)
-                due_date = cells[3].get_text(strip=True)
-                category = cells[4].get_text(strip=True)
-                assignment_name = cells[5].get_text(strip=True)
-                score = cells[6].get_text(strip=True)
-                percent = cells[7].get_text(strip=True)
-                letter_grade = cells[8].get_text(strip=True)
-                codes = cells[9].get_text(strip=True)
-
-                if teacher and teacher != "No Assignments Found.":
-                    status = "Unknown"
-                    if "Missing" in codes or "M" in codes:
-                        status = "Missing"
-                    elif "Late" in codes or "L" in codes:
-                        status = "Late"
-                    elif "Collected" in codes:
-                        status = "Collected"
-
-                    assignment = {
-                        "teacher": teacher,
-                        "course": course,
-                        "term": term,
-                        "due_date": due_date,
-                        "category": category,
-                        "assignment_name": assignment_name,
-                        "score": score,
-                        "percent": percent,
-                        "letter_grade": letter_grade,
-                        "codes": codes,
-                        "status": status,
-                    }
-                    assignments.append(assignment)
-                    print(f"  Found: {assignment_name} ({course}) - {status}")
-
-    (RAW_HTML_DIR / "assignments_q2.html").write_text(html)
-    print(f"  Total assignments found: {len(assignments)}")
+    print(f"    {len(assignments)} assignments found")
     return assignments
 
 
@@ -309,6 +373,7 @@ def scrape_attendance_dashboard(page: Page) -> dict:
         f"{BASE_URL}/guardian/mba_attendance_monitor/guardian_dashboard.html",
         wait_until="networkidle",
     )
+    _ensure_logged_in(page)
     page.wait_for_timeout(5000)
 
     data = {"rate": 0.0, "days_present": 0, "days_absent": 0, "tardies": 0, "total_days": 0}
@@ -401,6 +466,7 @@ def scrape_schedule(page: Page) -> list:
     """Scrape schedule page."""
     print("Scraping schedule...")
     page.goto(f"{BASE_URL}/guardian/myschedule.html", wait_until="networkidle")
+    _ensure_logged_in(page)
     page.wait_for_timeout(2000)
 
     html = page.content()
@@ -433,7 +499,7 @@ def scrape_schedule(page: Page) -> list:
 def _scrape_current_student(page, all_data: dict):
     """Scrape all data for the currently selected student and merge into all_data."""
     home_data = scrape_home_grades(page)
-    current_student = home_data.get("current_student", {})
+    current_student = home_data.get("current_student") or {}
     student_name_display = current_student.get("name", "Unknown")
     print(f"\nScraping data for: {student_name_display}")
 
@@ -448,29 +514,59 @@ def _scrape_current_student(page, all_data: dict):
         all_data["students"] = home_data["students"]
 
     all_data["current_student"] = current_student
+
+    # Tag courses with the student they belong to
+    student_id = current_student.get("id", "")
+    for c in home_data["courses"]:
+        c["student_name"] = student_name_display
+        c["student_id"] = student_id
     all_data["courses"].extend(home_data["courses"])
 
     print(f"\nFound {len(home_data['courses'])} courses")
     for c in home_data["courses"]:
-        print(f"  {c['course_name']}: Q1={c['q1']}, Q2={c['q2']}")
+        # Prefer F1/F2 (semester grades) over quarterly if available
+        if c.get("f1") or c.get("f2"):
+            grades = f"F1={c.get('f1', '')}, F2={c.get('f2', '')}"
+        else:
+            grades = f"Q1={c['q1']}, Q2={c['q2']}, Q3={c.get('q3', '')}, Q4={c.get('q4', '')}"
+        print(f"  {c['course_name']}: {grades}")
 
-    # Scrape individual course assignments
+    # Scrape individual course assignments using #scoreTable
+    # For each course, prefer F1/F2 term links (semester grades) over Q1-Q4 (quarter grades).
+    # F1 covers the same assignments as Q1+Q2 combined, so scraping both would duplicate.
     print("\n" + "=" * 40)
     print("Scraping course assignments...")
     student_assignments = []
-    for link_info in home_data["course_links"][:5]:
-        try:
-            assignments = scrape_course_assignments(
-                page, link_info["link"], link_info["course_name"]
-            )
-            student_assignments.extend(assignments)
-        except Exception as e:
-            print(f"  Error scraping {link_info['course_name']}: {e}")
 
-    # Also try Q2 assignments page
-    print("\n" + "=" * 40)
-    q2_assignments = scrape_assignments_q2(page)
-    student_assignments.extend(q2_assignments)
+    # Group term links by course
+    from collections import defaultdict
+    course_term_links: dict[str, list] = defaultdict(list)
+    for link_info in home_data["course_links"]:
+        course_term_links[link_info["course_name"]].append(link_info)
+
+    for course_name, term_links in course_term_links.items():
+        available_terms = {li["term"] for li in term_links}
+        semester_links = [li for li in term_links if li["term"] in ("F1", "F2")]
+        quarter_links = [li for li in term_links if li["term"] in ("Q1", "Q2", "Q3", "Q4")]
+
+        # Prefer semester links; fall back to quarter links
+        links_to_scrape = semester_links if semester_links else quarter_links
+        if SCRAPER_DEBUG:
+            print(f"  [debug] {course_name}: available terms={available_terms}, scraping={[li['term'] for li in links_to_scrape]}")
+
+        for link_info in links_to_scrape:
+            try:
+                assignments = scrape_course_assignments(
+                    page, link_info["link"], course_name, link_info["term"]
+                )
+                student_assignments.extend(assignments)
+            except Exception as e:
+                print(f"  Error scraping {course_name} [{link_info['term']}]: {e}")
+
+    # Tag all assignments with the student
+    for a in student_assignments:
+        a["student_name"] = student_name_display
+        a["student_id"] = student_id
 
     all_data["assignments"].extend(student_assignments)
     print(f"\nAssignments collected for {student_name_display}: {len(student_assignments)}")
@@ -478,8 +574,10 @@ def _scrape_current_student(page, all_data: dict):
     missing = [a for a in student_assignments if a.get("status") == "Missing"]
     print(f"Missing assignments: {len(missing)}")
     for a in missing:
+        due = a.get("due_date", "")
+        due_str = f" [due: {due}]" if due else ""
         print(
-            f"  - {a.get('assignment_name', a.get('assignment', 'Unknown'))} ({a.get('course', '')})"
+            f"  - {a.get('assignment_name', a.get('assignment', 'Unknown'))} ({a.get('course', '')}){due_str}"
         )
 
     # Scrape schedule
@@ -530,19 +628,21 @@ def run_full_scrape(headless: bool = False, student_name: str | None = None, all
             browser.close()
             sys.exit(1)
 
+        if SCRAPER_DEBUG:
+            print(f"  [debug] Post-login URL: {page.url}")
+        _dump_html(page, "post_login")
+
         if all_students:
-            # First scrape to discover available students
-            home_data = scrape_home_grades(page)
+            # Scrape default student (also discovers the student list)
+            home_data = _scrape_current_student(page, all_data)
             students = home_data.get("students", [])
+            current_id = (home_data.get("current_student") or {}).get("id")
+
             print(f"\nFound {len(students)} students on account")
             for s in students:
                 print(f"  - {s['name']} (ID: {s['id']})")
 
-            # Scrape default student first
-            _scrape_current_student(page, all_data)
-
             # Switch to and scrape each other student
-            current_id = home_data.get("current_student", {}).get("id")
             for student in students:
                 if student["id"] != current_id:
                     print(f"\n{'=' * 60}")
