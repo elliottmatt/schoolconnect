@@ -109,7 +109,7 @@ class ConnectionPool:
             TimeoutError: If no connection available within timeout
         """
         try:
-            conn = self._pool.get(block=True, timeout=self._timeout)
+            conn = self._pool.get(block=False)
             # Verify connection is still valid
             try:
                 conn.execute("SELECT 1")
@@ -123,7 +123,7 @@ class ConnectionPool:
                 logger.debug("Dead connection detected, creating new one")
                 return self._create_connection()
         except Empty:
-            # Pool is empty, try to create a new connection
+            # Pool is empty, create a new connection immediately
             with self._lock:
                 if self._pool.qsize() < self._pool_size:
                     logger.debug("Pool empty, creating new connection")
