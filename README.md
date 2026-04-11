@@ -56,6 +56,7 @@ DB_BACKUP_COUNT=5
 | `SCRAPER_DEBUG` | Set to `1` to dump HTML and screenshots to `raw_html/debug/` at each scraping step | `0` (off) |
 | `DB_BACKUP_COUNT` | Number of timestamped database backups to retain in `db_backups/` | `5` |
 | `DATABASE_PATH` | Path to SQLite database file | `./powerschool.db` |
+| `LOG_LEVEL` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 
 > **Security Note**: The `.env` file is excluded from version control via `.gitignore`. Never commit credentials to git.
 
@@ -121,6 +122,8 @@ powerschool missing
 powerschool missing -s "StudentName"
 ```
 
+Results are split into **Overdue** (past due date) and **Not Yet Due** (no score recorded but deadline hasn't passed).
+
 ### Generate Reports
 
 ```bash
@@ -128,12 +131,14 @@ powerschool missing -s "StudentName"
 powerschool report -s "StudentName"
 ```
 
-### Database Status
+### Check Status
 
 ```bash
-# Show database statistics and student overview
+# Show last sync time, data age, and per-student summary
 powerschool status
 ```
+
+Displays when data was last synced, whether it succeeded or failed, how many assignments were found, and a quick missing-assignment count per student.
 
 ### Action Items
 
@@ -312,14 +317,14 @@ The MCP server exposes 24 tools for AI agents:
 # Install dev dependencies
 uv sync --all-extras
 
-# Run tests
-uv run pytest
+# Run unit tests
+uv run --with pytest python -m pytest tests/unit/ -x
 
 # Run linter
-uv run ruff check src/
+uv run --with ruff ruff check src/ tests/ scripts/
 
 # Type checking
-uv run mypy src/
+uv run --with mypy mypy src/
 ```
 
 ## Privacy and Security
@@ -416,13 +421,14 @@ See `CLAUDE.md` for agent-assisted development workflow.
 - Automatic school name and grade level detection from page content
 - Database backup rotation with configurable retention
 - Debug mode with HTML/screenshot dumps at each scraping step
+- Teacher comments extraction and storage
+- Daily attendance records with pattern analysis
+- Sync history tracking (`powerschool status` shows last sync time and result)
 - CLI tools and MCP server (24 tools)
 - Streamlit chat interface
 
 **Planned Features:**
 
-- Teacher comments extraction
-- Daily attendance records
 - Bilingual interface (English/Spanish)
 - WhatsApp/SMS notifications
 - Voice interface
