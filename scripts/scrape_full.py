@@ -479,7 +479,7 @@ def _scrape_current_student(page, all_data: dict):
     all_data.setdefault("courses", [])
     all_data.setdefault("assignments", [])
     all_data.setdefault("schedule", [])
-    all_data.setdefault("attendance", {})
+    all_data.setdefault("attendance_by_student", [])
 
     # Merge student list (only once, they're the same across switches)
     if not all_data["students"]:
@@ -564,8 +564,8 @@ def _scrape_current_student(page, all_data: dict):
     print("\n" + "=" * 40)
     home_attendance = home_data.get("attendance", {})
     attendance = scrape_attendance_history(page, home_attendance)
-    # Store per-student attendance; last student's attendance wins for top-level
-    all_data["attendance"] = attendance
+    attendance["student_name"] = student_name_display
+    all_data["attendance_by_student"].append(attendance)
 
     return home_data
 
@@ -662,8 +662,8 @@ def run_full_scrape(headless: bool = False, student_name: str | None = None, all
     print(
         f"Missing: {len([a for a in all_data.get('assignments', []) if a.get('status') == 'Missing'])}"
     )
-    att = all_data.get("attendance", {})
-    print(f"Attendance: {att.get('rate', 0)}%")
+    for att in all_data.get("attendance_by_student", []):
+        print(f"Attendance [{att.get('student_name', '?')}]: {att.get('rate', 0)}%")
 
     return all_data
 

@@ -2,6 +2,8 @@
 """Load scraped data into the database."""
 
 import json
+import os
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -13,12 +15,47 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.database.connection import init_database, verify_database
+from src.database.connection import DB_PATH, init_database, verify_database
 from src.database.repository import Repository
+
+# Number of database backups to keep (configurable via .env)
+DB_BACKUP_COUNT = int(os.getenv("DB_BACKUP_COUNT", "5"))
+
+
+def _get_backup_dir() -> Path:
+    """Get the database backup directory."""
+    backup_dir = DB_PATH.parent / "db_backups"
+    backup_dir.mkdir(exist_ok=True)
+    return backup_dir
+
+
+def _rotate_backups():
+    """Delete oldest backups to keep only DB_BACKUP_COUNT copies."""
+    backup_dir = _get_backup_dir()
+    backups = sorted(backup_dir.glob("powerschool_*.db"))
+    while len(backups) > DB_BACKUP_COUNT:
+        oldest = backups.pop(0)
+        oldest.unlink()
+        print(f"  Removed old backup: {oldest.name}")
+
+
+def _backup_database():
+    """Copy the current database with a timestamp, then rotate old backups."""
+    if not DB_PATH.exists():
+        return
+    backup_dir = _get_backup_dir()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = backup_dir / f"powerschool_{timestamp}.db"
+    shutil.copy2(DB_PATH, backup_path)
+    print(f"  Backed up database to {backup_path.name}")
+    _rotate_backups()
 
 
 def load_scraped_data():
     """Load data from full_data.json into the database."""
+    # Backup current database before overwriting
+    _backup_database()
+
     # Initialize database
     print("Initializing database...")
     init_database(force=True)
@@ -47,70 +84,80 @@ def load_scraped_data():
         student_id = repo.upsert_student(
             powerschool_id=student["id"],
             first_name=student["name"],
+            grade_level=student.get("grade_level"),
+            school_name=student.get("school_name"),
         )
         student_ids[student["name"]] = student_id
         print(f"  Added student: {student['name']} (DB ID: {student_id})")
 
-    # Get current student
-    current_student = data.get("current_student", {})
-    current_student_name = current_student.get(
-        "name", list(student_ids.keys())[0] if student_ids else "Unknown"
-    )
-    current_student_id = student_ids.get(current_student_name, 1)
-    print(f"\nCurrent student: {current_student_name} (DB ID: {current_student_id})")
+    # Helper to resolve student DB ID from scraped student name
+    def get_student_db_id(item):
+        """Get database student ID from a scraped item's student_name/student_id."""
+        name = item.get("student_name", "")
+        if name and name in student_ids:
+            return student_ids[name]
+        # Fall back to current_student
+        current = data.get("current_student") or {}
+        fallback_name = current.get("name", "")
+        return student_ids.get(fallback_name, 1)
 
     # Insert courses and grades
     print("\n=== LOADING COURSES & GRADES ===")
-    course_ids = {}
+    # Track course_ids per student to handle multi-student
+    course_ids = {}  # (student_db_id, course_name) -> course_id
     seen_courses = set()
 
     for course in data.get("courses", []):
-        course_key = (course["course_name"], course.get("expression", ""))
+        sid = get_student_db_id(course)
+        course_key = (sid, course["course_name"], course.get("expression", ""))
 
         # Skip duplicates
         if course_key in seen_courses:
             continue
         seen_courses.add(course_key)
 
+        student_name = course.get("student_name", "?")
         course_id = repo.upsert_course(
-            student_id=current_student_id,
+            student_id=sid,
             course_name=course["course_name"],
             expression=course.get("expression"),
             room=course.get("room"),
             teacher_name=course.get("teacher_name"),
-            term="S1",  # Default to S1
+            term="S1",
         )
-        course_ids[course["course_name"]] = course_id
-        print(f"  Added course: {course['course_name']} (ID: {course_id})")
+        course_ids[(sid, course["course_name"])] = course_id
+        print(f"  [{student_name}] {course['course_name']} (ID: {course_id})")
 
-        # Add grades for Q1 and Q2 only (these are the actual grades)
-        # The q3, q4, s2 in our scraped data are actually absences/tardies columns
-        for term in ["q1", "q2", "s1"]:
-            grade = course.get(term)
-            # Valid grades are: numbers (1-4, 3.5), letters (A-F), P (pass)
-            if grade and grade not in ["", "Not available", "[ i ]", "-"]:
-                # Check if it looks like a grade (not a number > 10 which would be absences)
-                try:
-                    if grade.replace(".", "").isdigit():
-                        num = float(grade)
-                        if num > 10:  # This is probably absences, not a grade
-                            continue
-                except ValueError:
-                    pass
+        # Add grades — prefer F1/F2 (semester) over Q1-Q4 (quarter) when available
+        absences = int(course.get("absences", 0)) if str(course.get("absences", "")).isdigit() else 0
+        tardies = int(course.get("tardies", 0)) if str(course.get("tardies", "")).isdigit() else 0
 
-                repo.add_grade(
-                    course_id=course_id,
-                    student_id=current_student_id,
-                    term=term.upper(),
-                    letter_grade=grade,
-                    absences=int(course.get("absences", 0))
-                    if str(course.get("absences", "")).isdigit()
-                    else 0,
-                    tardies=int(course.get("tardies", 0))
-                    if str(course.get("tardies", "")).isdigit()
-                    else 0,
-                )
-                print(f"    Grade {term.upper()}: {grade}")
+        f1 = course.get("f1", "")
+        f2 = course.get("f2", "")
+        has_semester = bool(f1 or f2)
+
+        if has_semester:
+            terms = [("F1", f1), ("F2", f2)]
+        else:
+            terms = [
+                ("Q1", course.get("q1", "")),
+                ("Q2", course.get("q2", "")),
+                ("Q3", course.get("q3", "")),
+                ("Q4", course.get("q4", "")),
+            ]
+
+        for term_name, grade in terms:
+            if not grade or grade in ["Not available", "[ i ]", "-"]:
+                continue
+            repo.add_grade(
+                course_id=course_id,
+                student_id=sid,
+                term=term_name,
+                letter_grade=grade,
+                absences=absences,
+                tardies=tardies,
+            )
+            print(f"    Grade {term_name}: {grade}")
 
     # Insert assignments
     print("\n=== LOADING ASSIGNMENTS ===")
@@ -126,6 +173,7 @@ def load_scraped_data():
         if not name or len(name) < 2:
             continue
 
+        sid = get_student_db_id(assignment)
         course_name = assignment.get("course", "Unknown")
         status = assignment.get("status", "Unknown")
 
@@ -133,14 +181,13 @@ def load_scraped_data():
         due_date = assignment.get("due_date")
         if due_date:
             try:
-                # Try MM/DD/YYYY format
                 dt = datetime.strptime(due_date, "%m/%d/%Y")
                 due_date = dt.strftime("%Y-%m-%d")
             except ValueError:
                 due_date = None
 
         repo.add_assignment(
-            student_id=current_student_id,
+            student_id=sid,
             course_name=course_name,
             assignment_name=name,
             teacher_name=assignment.get("teacher"),
@@ -158,50 +205,63 @@ def load_scraped_data():
 
         if status == "Missing":
             missing_count += 1
-            print(f"  [MISSING] {name} ({course_name})")
-        else:
-            print(f"  {name} ({course_name}) - {status}")
 
     print(f"\nLoaded {len(assignments)} assignments, {missing_count} missing")
 
-    # Insert attendance summary (use data from home page if available)
+    # Insert attendance summary
     print("\n=== LOADING ATTENDANCE ===")
-    attendance = data.get("attendance", {})
-    if attendance.get("rate"):
-        repo.add_attendance_summary(
-            student_id=current_student_id,
-            attendance_rate=attendance.get("rate", 0),
-            days_present=attendance.get("days_present", 0),
-            days_absent=attendance.get("days_absent", 0),
-            tardies=attendance.get("tardies", 0),
-            total_days=attendance.get("total_days", 0),
-        )
-        print(f"  Attendance rate: {attendance.get('rate')}%")
-    else:
-        # Calculate from course data
+    # Prefer per-student attendance list; fall back to legacy single-student key
+    attendance_list = data.get("attendance_by_student") or []
+    if not attendance_list and data.get("attendance", {}).get("rate"):
+        # Legacy single-student format
+        current_student = data.get("current_student") or {}
+        att = data["attendance"]
+        att["student_name"] = current_student.get("name", "")
+        attendance_list = [att]
+
+    loaded_student_ids = set()
+    for attendance in attendance_list:
+        att_student_name = attendance.get("student_name", "")
+        att_student_id = student_ids.get(att_student_name)
+        if att_student_id is None:
+            print(f"  [WARN] Unknown student in attendance: {att_student_name!r}")
+            continue
+        if attendance.get("rate"):
+            repo.add_attendance_summary(
+                student_id=att_student_id,
+                attendance_rate=attendance.get("rate", 0),
+                days_present=attendance.get("days_present", 0),
+                days_absent=attendance.get("days_absent", 0),
+                tardies=attendance.get("tardies", 0),
+                total_days=attendance.get("total_days", 0),
+            )
+            print(f"  [{att_student_name}] Attendance rate: {attendance.get('rate')}%")
+            loaded_student_ids.add(att_student_id)
+
+    # For any student still missing attendance, estimate from course grades data
+    for student_name, sid in student_ids.items():
+        if sid in loaded_student_ids:
+            continue
+        student_courses = [c for c in data.get("courses", []) if c.get("student_name") == student_name]
         total_absences = sum(
             int(c.get("absences", 0)) if str(c.get("absences", "")).isdigit() else 0
-            for c in data.get("courses", [])
+            for c in student_courses
         )
         total_tardies = sum(
             int(c.get("tardies", 0)) if str(c.get("tardies", "")).isdigit() else 0
-            for c in data.get("courses", [])
+            for c in student_courses
         )
-        # Estimate based on typical school year
-        # Assuming roughly 80 school days so far
         estimated_days = 80
-        num_courses = max(len(data.get("courses", [])), 1)
+        num_courses = max(len(student_courses), 1)
         estimated_rate = ((estimated_days - (total_absences / num_courses)) / estimated_days) * 100
         repo.add_attendance_summary(
-            student_id=current_student_id,
+            student_id=sid,
             attendance_rate=round(estimated_rate, 1),
-            days_absent=int(total_absences / max(len(data.get("courses", [1])), 1)),
-            tardies=int(total_tardies / max(len(data.get("courses", [1])), 1)),
+            days_absent=int(total_absences / num_courses),
+            tardies=int(total_tardies / num_courses),
             total_days=estimated_days,
         )
-        print("  Estimated attendance from course data")
-        print(f"  Total absences across courses: {total_absences}")
-        print(f"  Total tardies across courses: {total_tardies}")
+        print(f"  [{student_name}] Estimated attendance from course data")
 
     # Extract and insert teachers from course data
     print("\n=== LOADING TEACHERS ===")
@@ -266,27 +326,32 @@ def load_scraped_data():
     info = verify_database()
     print(f"Row counts: {info.get('row_counts', {})}")
 
-    # Test queries
-    print("\n=== TEST QUERIES ===")
+    # Summary for each student
+    print("\n=== SUMMARY ===")
     students = repo.get_students()
-    print(f"Students: {[s['first_name'] for s in students]}")
+    for student in students:
+        sid = student["id"]
+        summary = repo.get_student_summary(sid)
+        print(f"\n--- {student['first_name']} ---")
+        if summary:
+            print(f"  Courses: {summary['course_count']}")
+            print(f"  Missing: {summary['missing_assignments']}")
 
-    missing = repo.get_missing_assignments()
-    print(f"\nMissing assignments: {len(missing)}")
-    for m in missing:
-        print(f"  - {m['assignment_name']} ({m['course_name']})")
+        missing = repo.get_missing_assignments(sid)
+        if missing:
+            print("  Missing assignments:")
+            for m in missing:
+                due = m.get("due_date", "")
+                due_str = f" [due: {due}]" if due else ""
+                print(f"    - {m['assignment_name']} ({m['course_name']}){due_str}")
 
-    summary = repo.get_student_summary(current_student_id)
-    if summary:
-        print("\nStudent summary:")
-        print(f"  Name: {summary['student_name']}")
-        print(f"  Courses: {summary['course_count']}")
-        print(f"  Missing: {summary['missing_assignments']}")
-
-    actions = repo.get_action_items(current_student_id)
-    print(f"\nAction items: {len(actions)}")
-    for a in actions[:5]:
-        print(f"  [{a['priority']}] {a['message']}")
+        actions = repo.get_action_items(sid)
+        if actions:
+            print(f"  Action items: {len(actions)}")
+            for a in actions[:5]:
+                date = a.get("relevant_date", "")
+                date_str = f" [{date}]" if date else ""
+                print(f"    [{a['priority']}] {a['message']}{date_str}")
 
     print("\n=== LOAD COMPLETE ===")
 
