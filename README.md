@@ -120,6 +120,15 @@ powerschool missing
 
 # Show for specific student
 powerschool missing -s "StudentName"
+
+# Hide future-dated items (only show what's actually past due)
+powerschool missing --ignore-future
+
+# Hide old items (e.g. ignore anything overdue more than 14 days)
+powerschool missing --ignore-older-than 14
+
+# Combine: only recent, actually-overdue items
+powerschool missing --ignore-future --ignore-older-than 14
 ```
 
 Results are split into **Overdue** (past due date) and **Not Yet Due** (no score recorded but deadline hasn't passed).
