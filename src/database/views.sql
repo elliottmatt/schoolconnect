@@ -24,29 +24,52 @@ WHERE a.status = 'Missing'
 ORDER BY a.due_date DESC;
 
 -- View: Current Grades
--- Latest grades by student and course
+-- Latest grades by student and course, preferring the most current term
+-- (F2/S2 over F1/S1, Q4 > Q3 > Q2 > Q1)
+DROP VIEW IF EXISTS v_current_grades;
 CREATE VIEW IF NOT EXISTS v_current_grades AS
-SELECT
-    s.id AS student_id,
-    s.first_name || ' ' || COALESCE(s.last_name, '') AS student_name,
-    c.course_name,
-    c.teacher_name,
-    c.room,
-    g.term,
-    g.letter_grade,
-    g.percent,
-    g.absences,
-    g.tardies,
-    g.recorded_at
-FROM students s
-JOIN courses c ON c.student_id = s.id
-JOIN grades g ON g.course_id = c.id
-WHERE g.recorded_at = (
-    SELECT MAX(g2.recorded_at)
-    FROM grades g2
-    WHERE g2.course_id = c.id AND g2.term = g.term
+WITH latest_per_term AS (
+    SELECT
+        s.id AS student_id,
+        s.first_name || ' ' || COALESCE(s.last_name, '') AS student_name,
+        c.course_name,
+        c.teacher_name,
+        c.room,
+        g.term,
+        g.letter_grade,
+        g.percent,
+        g.absences,
+        g.tardies,
+        g.recorded_at,
+        CASE g.term
+            WHEN 'Y1' THEN 10
+            WHEN 'F2' THEN 8
+            WHEN 'S2' THEN 8
+            WHEN 'F1' THEN 6
+            WHEN 'S1' THEN 6
+            WHEN 'Q4' THEN 4
+            WHEN 'Q3' THEN 3
+            WHEN 'Q2' THEN 2
+            WHEN 'Q1' THEN 1
+            ELSE 0
+        END AS term_rank
+    FROM students s
+    JOIN courses c ON c.student_id = s.id
+    JOIN grades g ON g.course_id = c.id
+    WHERE g.recorded_at = (
+        SELECT MAX(g2.recorded_at)
+        FROM grades g2
+        WHERE g2.course_id = c.id AND g2.term = g.term
+    )
 )
-ORDER BY s.first_name, c.course_name, g.term;
+SELECT student_id, student_name, course_name, teacher_name, room, term, letter_grade, percent, absences, tardies, recorded_at
+FROM latest_per_term tp
+WHERE term_rank = (
+    SELECT MAX(term_rank)
+    FROM latest_per_term tp2
+    WHERE tp2.student_id = tp.student_id AND tp2.course_name = tp.course_name
+)
+ORDER BY student_name, course_name;
 
 -- View: Grade Trends
 -- Shows grade progression Q1 -> Q2 -> Q3 -> Q4
