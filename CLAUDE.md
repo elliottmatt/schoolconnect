@@ -71,7 +71,7 @@ cat /tmp/results/test-summary.json
 
 1. **Understand** - Read relevant code before making changes
 2. **Implement** - Make focused, minimal changes
-3. **Local Check** - Run `ruff check src/ tests/` and `pytest tests/unit/ -x`
+3. **Local Check** - Run `uv run --with ruff ruff check src/ tests/ scripts/` and `uv run pytest tests/unit/ -x`
 4. **Push** - Commit and push changes
 5. **Validate** - Trigger CI pipeline with `quick-check`
 6. **Iterate** - Fix any failures, repeat until passing
