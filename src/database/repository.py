@@ -820,6 +820,26 @@ class Repository:
                 (status, assignments_found, error_message, scrape_id),
             )
 
+    def get_last_sync(self) -> Optional[Dict]:
+        """Get the most recent completed or failed sync record.
+
+        Returns:
+            Dict with started_at, completed_at, status, assignments_found,
+            and error_message, or None if no syncs have been recorded.
+        """
+        with get_db(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                SELECT started_at, completed_at, status, assignments_found, error_message
+                FROM scrape_history
+                WHERE status IN ('completed', 'failed')
+                ORDER BY started_at DESC
+                LIMIT 1
+                """
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
     # ==================== SUMMARIES ====================
 
     def get_student_summary(self, student_id: int) -> Optional[Dict]:

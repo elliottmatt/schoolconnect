@@ -365,26 +365,49 @@ def students(live: bool, headless: bool):
 
 @cli.command()
 def status():
-    """Show database status and student overview."""
+    """Show last sync time and student overview."""
+    from datetime import datetime, timezone
+
     repo = Repository()
-    info = verify_database()
 
-    # Database info
-    console.print(Panel("[bold]Database Status[/bold]"))
-    table = Table(show_header=False)
-    table.add_column("Item", style="cyan")
-    table.add_column("Value")
+    # Last sync
+    sync = repo.get_last_sync()
+    if sync:
+        completed_at = sync.get("completed_at") or sync.get("started_at")
+        try:
+            synced_dt = datetime.fromisoformat(completed_at)
+            if synced_dt.tzinfo is None:
+                synced_dt = synced_dt.replace(tzinfo=timezone.utc)
+            delta = datetime.now(timezone.utc) - synced_dt
+            hours = int(delta.total_seconds() // 3600)
+            minutes = int((delta.total_seconds() % 3600) // 60)
+            if hours >= 24:
+                age_str = f"{hours // 24}d {hours % 24}h ago"
+            elif hours > 0:
+                age_str = f"{hours}h {minutes}m ago"
+            else:
+                age_str = f"{minutes}m ago"
+        except (ValueError, TypeError):
+            age_str = "unknown"
 
-    for item, count in info.get("row_counts", {}).items():
-        if not item.startswith("sqlite_"):
-            table.add_row(item.title(), str(count))
-
-    console.print(table)
+        sync_status = sync.get("status", "unknown")
+        status_icon = (
+            "[green]✅ completed[/green]" if sync_status == "completed"
+            else "[red]❌ failed[/red]" if sync_status == "failed"
+            else f"[yellow]{sync_status}[/yellow]"
+        )
+        console.print(f"Last sync:   {completed_at}  {status_icon}  ({age_str})")
+        if sync.get("assignments_found") is not None:
+            console.print(f"Assignments: {sync['assignments_found']} found in last sync")
+        if sync.get("error_message"):
+            console.print(f"[red]Error:       {sync['error_message']}[/red]")
+    else:
+        console.print("[yellow]Last sync:   never — run `sync` to pull data from PowerSchool[/yellow]")
 
     # Students overview
     students = repo.get_students()
     if students:
-        console.print("\n[bold]Students[/bold]")
+        console.print()
         for s in students:
             summary = repo.get_student_summary(s["id"])
             if summary:

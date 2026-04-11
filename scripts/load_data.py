@@ -76,7 +76,22 @@ def load_scraped_data():
         data = json.load(f)
 
     repo = Repository()
+    scrape_id = repo.start_scrape()
 
+    try:
+        _load_scraped_data_inner(repo, data)
+        assignments = data.get("assignments", [])
+        assignments_found = len(assignments)
+        repo.complete_scrape(scrape_id, status="completed", assignments_found=assignments_found)
+    except Exception as e:
+        repo.complete_scrape(scrape_id, status="failed", error_message=str(e))
+        raise
+
+    print("\n=== LOAD COMPLETE ===")
+
+
+def _load_scraped_data_inner(repo: Repository, data: dict):
+    """Inner loader — called within a scrape_history transaction."""
     # Insert students
     print("\n=== LOADING STUDENTS ===")
     student_ids = {}
@@ -352,8 +367,6 @@ def load_scraped_data():
                 date = a.get("relevant_date", "")
                 date_str = f" [{date}]" if date else ""
                 print(f"    [{a['priority']}] {a['message']}{date_str}")
-
-    print("\n=== LOAD COMPLETE ===")
 
 
 if __name__ == "__main__":
