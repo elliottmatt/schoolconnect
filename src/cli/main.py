@@ -107,20 +107,32 @@ def sync(headless: bool, student: str, all_students: bool):
 
 @cli.command()
 @click.option("--student", "-s", default="all", help="Student name (default: all)")
-def missing(student: str):
+@click.option("--ignore-future", is_flag=True, help="Hide assignments not yet past due date")
+@click.option("--ignore-older-than", type=int, default=None, metavar="DAYS", help="Hide assignments overdue more than N days")
+def missing(student: str, ignore_future: bool, ignore_older_than: int):
     """Show missing assignments."""
     repo = Repository()
+
+    def filter_list(missing_list: list) -> list:
+        result = missing_list
+        if ignore_future:
+            result = [m for m in result if (m.get("days_overdue") or 0) > 0]
+        if ignore_older_than is not None:
+            result = [m for m in result if (m.get("days_overdue") or 0) <= ignore_older_than]
+        return result
 
     def print_missing_for(name: str, missing_list: list):
         """Print missing assignments for one student, split into overdue / not-yet-due."""
         console.print(f"\n[bold cyan]=== {name} ===[/bold cyan]")
 
-        if not missing_list:
+        filtered = filter_list(missing_list)
+
+        if not filtered:
             console.print("[green]  nothing missing[/green]")
             return
 
-        overdue = [m for m in missing_list if (m.get("days_overdue") or 0) > 0]
-        not_yet_due = [m for m in missing_list if (m.get("days_overdue") or 0) <= 0]
+        overdue = [m for m in filtered if (m.get("days_overdue") or 0) > 0]
+        not_yet_due = [m for m in filtered if (m.get("days_overdue") or 0) <= 0]
 
         def make_table(rows, title_str, name_style):
             t = Table(title=title_str, show_lines=False)
