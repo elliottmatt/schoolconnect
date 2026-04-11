@@ -299,6 +299,27 @@ def scrape_home_grades(page: Page) -> dict:
         if data["current_student"]:
             data["current_student"]["grade_level"] = grade_level
 
+    # Extract student-level attendance totals from "Attendance Totals" row
+    # This row is in the same linkDescList table and shows total absences/tardies
+    attendance = {"days_absent": 0, "tardies": 0}
+    for table in tables:
+        for row in table.select("tr"):
+            cells = row.select("td")
+            if cells and cells[0].get_text(strip=True) == "Attendance Totals":
+                if len(cells) >= 2:
+                    try:
+                        attendance["days_absent"] = int(cells[1].get_text(strip=True) or 0)
+                    except ValueError:
+                        pass
+                if len(cells) >= 3:
+                    try:
+                        attendance["tardies"] = int(cells[2].get_text(strip=True) or 0)
+                    except ValueError:
+                        pass
+                print(f"  Attendance totals: {attendance['days_absent']} absences, {attendance['tardies']} tardies")
+                break
+    data["attendance"] = attendance
+
     (RAW_HTML_DIR / "home.html").write_text(html)
     return data
 
@@ -366,99 +387,50 @@ def scrape_course_assignments(page: Page, course_link: str, course_name: str, te
     return assignments
 
 
-def scrape_attendance_dashboard(page: Page) -> dict:
-    """Scrape attendance dashboard."""
-    print("Scraping attendance dashboard...")
-    page.goto(
-        f"{BASE_URL}/guardian/mba_attendance_monitor/guardian_dashboard.html",
-        wait_until="networkidle",
-    )
+def scrape_attendance_history(page: Page, home_attendance: dict) -> dict:
+    """Scrape attendance from /guardian/attendance.html.
+
+    Uses absence/tardy totals already extracted from the home page, and
+    navigates to attendance.html to count total days for a rate calculation.
+    Falls back gracefully if the page is unavailable.
+    """
+    print("Scraping attendance history...")
+    data = dict(home_attendance)  # Start with totals already from home page
+
+    page.goto(f"{BASE_URL}/guardian/attendance.html", wait_until="networkidle")
     _ensure_logged_in(page)
-    page.wait_for_timeout(5000)
-
-    data = {"rate": 0.0, "days_present": 0, "days_absent": 0, "tardies": 0, "total_days": 0}
-
-    # Wait for data to load
-    try:
-        # Wait for any attendance percentage to appear
-        page.wait_for_selector("text=/\\d+\\.?\\d*%/", timeout=10000)
-    except Exception:
-        print("  Waiting longer for attendance data...")
-        page.wait_for_timeout(5000)
+    page.wait_for_timeout(1500)
 
     html = page.content()
     soup = BeautifulSoup(html, "lxml")
-
-    # Try to extract from Angular rendered content
-    # Look for percentage values
-    text_content = soup.get_text()
-
-    # Find attendance rate - look for pattern like "88.6%" or similar
-    rate_matches = re.findall(r"(\d+\.?\d*)%", text_content)
-    if rate_matches:
-        # Filter to reasonable attendance rates (50-100%)
-        for rate in rate_matches:
-            rate_float = float(rate)
-            if 50 <= rate_float <= 100:
-                data["rate"] = rate_float
-                print(f"  Found attendance rate: {rate_float}%")
-                break
-
-    # Look for specific numbers near keywords
-    # Try to find numbers in table cells or divs near "Present", "Absent", etc.
-    for elem in soup.find_all(["td", "div", "span"]):
-        text = elem.get_text(strip=True).lower()
-        if "present" in text:
-            nums = re.findall(r"\d+", elem.get_text())
-            if nums:
-                data["days_present"] = int(nums[0])
-        elif "absent" in text and "tardy" not in text:
-            nums = re.findall(r"\d+", elem.get_text())
-            if nums:
-                data["days_absent"] = int(nums[0])
-        elif "tardy" in text or "tardies" in text:
-            nums = re.findall(r"\d+", elem.get_text())
-            if nums:
-                data["tardies"] = int(nums[0])
-
-    # Try JavaScript evaluation
-    try:
-        js_data = page.evaluate("""
-            () => {
-                try {
-                    const scope = angular.element(document.body).scope();
-                    if (scope && scope.student) {
-                        return {
-                            rate: scope.student.attendanceRate || scope.student.rate,
-                            present: scope.student.daysPresent || scope.student.present,
-                            absent: scope.student.daysAbsent || scope.student.absent,
-                            tardy: scope.student.tardies || scope.student.tardy
-                        };
-                    }
-                    // Try alternative data sources
-                    if (window.attendanceData) {
-                        return window.attendanceData;
-                    }
-                } catch (e) {}
-                return null;
-            }
-        """)
-        if js_data:
-            if js_data.get("rate"):
-                data["rate"] = float(js_data["rate"])
-            if js_data.get("present"):
-                data["days_present"] = int(js_data["present"])
-            if js_data.get("absent"):
-                data["days_absent"] = int(js_data["absent"])
-            if js_data.get("tardy"):
-                data["tardies"] = int(js_data["tardy"])
-    except Exception as e:
-        print(f"  Could not extract JS data: {e}")
-
     (RAW_HTML_DIR / "attendance.html").write_text(html)
-    print(
-        f"  Attendance: {data['rate']}% - Present: {data['days_present']}, Absent: {data['days_absent']}, Tardies: {data['tardies']}"
-    )
+
+    if len(html) < 500:
+        print(f"  attendance.html unavailable ({len(html)} bytes), using home page totals")
+    else:
+        # Count total attendance records to estimate total days
+        # The page has rows for each class period on each day
+        rows = soup.select("table tr")
+        record_count = sum(1 for r in rows if r.select("td"))
+        if SCRAPER_DEBUG:
+            print(f"  [debug] attendance.html: {len(html)} bytes, {record_count} rows")
+
+    # Compute rate from absences if we have totals
+    days_absent = data.get("days_absent", 0)
+    tardies = data.get("tardies", 0)
+    if days_absent > 0 or tardies > 0:
+        # Estimate total school days based on current date in the school year
+        # School year ~175 days; rough estimate based on April = ~130 days in
+        total_days = data.get("total_days") or 130
+        days_present = total_days - days_absent
+        rate = round((days_present / total_days) * 100, 1) if total_days > 0 else 0.0
+        data.update({
+            "days_present": days_present,
+            "total_days": total_days,
+            "rate": rate,
+        })
+
+    print(f"  Absences: {data.get('days_absent', 0)}, Tardies: {data.get('tardies', 0)}, Rate: {data.get('rate', 0)}%")
     return data
 
 
@@ -588,9 +560,10 @@ def _scrape_current_student(page, all_data: dict):
     else:
         all_data["schedule"] = schedule
 
-    # Scrape attendance
+    # Scrape attendance — totals come from the home page, history page adds context
     print("\n" + "=" * 40)
-    attendance = scrape_attendance_dashboard(page)
+    home_attendance = home_data.get("attendance", {})
+    attendance = scrape_attendance_history(page, home_attendance)
     # Store per-student attendance; last student's attendance wins for top-level
     all_data["attendance"] = attendance
 
