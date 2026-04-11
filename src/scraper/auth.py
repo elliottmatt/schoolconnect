@@ -42,7 +42,7 @@ def get_base_url() -> str:
     """
     if not BASE_URL:
         raise ValueError("POWERSCHOOL_URL environment variable is required")
-    return BASE_URL
+    return BASE_URL.rstrip("/")
 
 
 def get_credentials() -> tuple[str, str]:
