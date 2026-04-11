@@ -192,7 +192,7 @@ class LogConfig:
 
         # Development
         return cls(
-            level="DEBUG",
+            level="INFO",
             output=LogOutput.CONSOLE,
             json_format=False,
             use_rich=True,
