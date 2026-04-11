@@ -3,6 +3,7 @@
 
 -- View: Missing Assignments
 -- Lists all missing assignments with course and teacher info
+DROP VIEW IF EXISTS v_missing_assignments;
 CREATE VIEW IF NOT EXISTS v_missing_assignments AS
 SELECT
     a.id,
@@ -14,6 +15,7 @@ SELECT
     a.category,
     a.due_date,
     a.term,
+    a.score,
     julianday('now') - julianday(a.due_date) AS days_overdue,
     a.recorded_at
 FROM assignments a

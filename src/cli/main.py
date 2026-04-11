@@ -111,46 +111,60 @@ def missing(student: str):
     """Show missing assignments."""
     repo = Repository()
 
+    def print_missing_for(name: str, missing_list: list):
+        """Print missing assignments for one student, split into overdue / not-yet-due."""
+        console.print(f"\n[bold cyan]=== {name} ===[/bold cyan]")
+
+        if not missing_list:
+            console.print("[green]  nothing missing[/green]")
+            return
+
+        overdue = [m for m in missing_list if (m.get("days_overdue") or 0) > 0]
+        not_yet_due = [m for m in missing_list if (m.get("days_overdue") or 0) <= 0]
+
+        def make_table(rows, title_str, name_style):
+            t = Table(title=title_str, show_lines=False)
+            t.add_column("Assignment", style=name_style)
+            t.add_column("Course")
+            t.add_column("Score")
+            t.add_column("Due Date")
+            t.add_column("Days Overdue", justify="right")
+            for m in rows:
+                days = m.get("days_overdue") or 0
+                days_str = f"{int(days)}" if days > 0 else "-"
+                score = m.get("score") or "--"
+                t.add_row(
+                    m["assignment_name"][:40],
+                    m["course_name"][:25],
+                    score,
+                    str(m.get("due_date") or "N/A"),
+                    days_str,
+                )
+            return t
+
+        if overdue:
+            console.print(make_table(overdue, "Overdue", "red"))
+            console.print(f"  [bold red]{len(overdue)} overdue[/bold red]")
+
+        if not_yet_due:
+            console.print(make_table(not_yet_due, "Not Yet Due (no score yet)", "yellow"))
+            console.print(f"  [yellow]{len(not_yet_due)} not yet due[/yellow]")
+
     if student.lower() == "all":
-        student_id = None
-        title = "All Students"
+        students = repo.get_students()
+        if not students:
+            console.print("[yellow]No students in database.[/yellow]")
+            return
+        for s in students:
+            missing_list = repo.get_missing_assignments(s["id"])
+            print_missing_for(s["first_name"], missing_list)
     else:
         s = repo.get_student_by_name(student)
         if not s:
             console.print(f"[red]Student not found: {student}[/red]")
             return
-        student_id = s["id"]
-        title = s["first_name"]
-
-    missing_list = repo.get_missing_assignments(student_id)
-
-    if not missing_list:
-        console.print(
-            Panel(
-                "[green]No missing assignments! 🎉[/green]", title=f"Missing Assignments - {title}"
-            )
-        )
-
-    table = Table(title=f"Missing Assignments - {title}")
-    table.add_column("Assignment", style="red")
-    table.add_column("Course")
-    table.add_column("Teacher")
-    table.add_column("Due Date")
-    table.add_column("Days Overdue", justify="right")
-
-    for m in missing_list:
-        days = m.get("days_overdue", 0)
-        days_str = f"{int(days)}" if days else "-"
-        table.add_row(
-            m["assignment_name"][:40],
-            m["course_name"][:25],
-            m.get("teacher_name", "N/A")[:20],
-            str(m.get("due_date", "N/A")),
-            days_str,
-        )
-
-    console.print(table)
-    console.print(f"\n[bold red]Total missing: {len(missing_list)}[/bold red]")
+        missing_list = repo.get_missing_assignments(s["id"])
+        print_missing_for(s["first_name"], missing_list)
 
 
 @cli.command()
@@ -340,8 +354,11 @@ def students(live: bool, headless: bool):
         table.add_column("School")
 
         for s in student_list:
-            name = f"{s['first_name']} {s.get('last_name', '')}".strip()
-            table.add_row(name, str(s.get("grade_level", "")), s.get("school_name", ""))
+            name = s['first_name']
+            last = s.get('last_name')
+            if last:
+                name = f"{name} {last}"
+            table.add_row(name, str(s.get("grade_level") or ""), s.get("school_name") or "")
 
         console.print(table)
 
