@@ -40,7 +40,22 @@ Create a `.env` file in the project root with your PowerSchool credentials:
 POWERSCHOOL_URL=https://your-school.powerschool.com
 POWERSCHOOL_USERNAME=your-username
 POWERSCHOOL_PASSWORD=your-password
+
+# Optional: Enable debug HTML/screenshot dumps during scraping
+SCRAPER_DEBUG=0
+
+# Optional: Number of database backups to keep (default: 5)
+DB_BACKUP_COUNT=5
 ```
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `POWERSCHOOL_URL` | Your school's PowerSchool portal URL | Required |
+| `POWERSCHOOL_USERNAME` | Parent portal username | Required |
+| `POWERSCHOOL_PASSWORD` | Parent portal password | Required |
+| `SCRAPER_DEBUG` | Set to `1` to dump HTML and screenshots to `raw_html/debug/` at each scraping step | `0` (off) |
+| `DB_BACKUP_COUNT` | Number of timestamped database backups to retain in `db_backups/` | `5` |
+| `DATABASE_PATH` | Path to SQLite database file | `./powerschool.db` |
 
 > **Security Note**: The `.env` file is excluded from version control via `.gitignore`. Never commit credentials to git.
 
@@ -59,11 +74,32 @@ powerschool init-db --force
 ### Sync Data from PowerSchool
 
 ```bash
-# Full sync (opens browser, logs in, scrapes all students)
+# Sync the currently selected student
 powerschool sync
 
 # Headless mode (no visible browser)
 powerschool sync --headless
+
+# Sync ALL students on the account (iterates through student switcher)
+powerschool sync --all-students --headless
+
+# Sync a specific student by name
+powerschool sync -s "Daphne" --headless
+```
+
+Each sync automatically backs up the current database before overwriting it. Backups are stored in `db_backups/` with timestamps and rotated to keep only the most recent `DB_BACKUP_COUNT` copies.
+
+### List Students
+
+```bash
+# Show students from the local database
+powerschool students
+
+# Query PowerSchool directly (opens browser, shows student number & ID)
+powerschool students --live
+
+# Live query in headless mode
+powerschool students --live --headless
 ```
 
 ### View Grades
@@ -72,6 +108,8 @@ powerschool sync --headless
 # Show current grades for a student
 powerschool grades -s "StudentName"
 ```
+
+The scraper extracts all grade columns from PowerSchool: Q1, Q2, F1, Q3, Q4, F2. Semester grades (F1/F2) are preferred over quarter grades (Q1-Q4) when available, since F1 covers Q1+Q2 and F2 covers Q3+Q4.
 
 ### Check Missing Assignments
 
@@ -196,9 +234,12 @@ schoolconnect/
 │           ├── course_scores.py   # Grade details & assignments
 │           └── teacher_comments.py # Teacher feedback
 ├── scripts/              # Standalone scraping scripts
-│   ├── scrape_full.py    # Full data scrape
-│   └── load_data.py      # Load scraped data to DB
+│   ├── scrape_full.py    # Full data scrape (multi-student support)
+│   └── load_data.py      # Load scraped data to DB (with backup rotation)
 ├── tests/                # Test suite
+├── db_backups/           # Timestamped database backups (not in git)
+├── raw_html/             # Scraped HTML and debug dumps (not in git)
+│   └── debug/            # HTML + screenshot dumps (SCRAPER_DEBUG=1)
 ├── pyproject.toml        # Project configuration
 └── .env                  # Credentials (not in git)
 ```
@@ -211,7 +252,7 @@ The database includes 13 pre-built views for common queries:
 |------|-------------|
 | `v_current_grades` | Latest grades by student and course |
 | `v_missing_assignments` | All missing assignments with details |
-| `v_grade_trends` | Grade progression Q1 -> Q2 -> S1 -> Q3 -> Q4 -> S2 |
+| `v_grade_trends` | Grade progression Q1 -> Q2 -> F1 -> Q3 -> Q4 -> F2 |
 | `v_attendance_alerts` | Students with attendance below 95% |
 | `v_upcoming_assignments` | Assignments due in next 14 days |
 | `v_assignment_completion_rate` | Completion rates by student and course |
@@ -311,14 +352,39 @@ uv run playwright install chromium
 **Login failures:**
 
 - Verify credentials in `.env` file
-- Check PowerSchool URL format (must include https://)
-- Try running with visible browser: `powerschool sync` (without --headless)
+- Check PowerSchool URL format (must include `https://`, no trailing slash)
+- Try running with visible browser: `powerschool sync` (without `--headless`)
 
 **Import errors:**
 
 ```bash
 # Ensure all dependencies are installed
 uv sync
+```
+
+### Debug Mode
+
+If scraping returns empty data or fails silently, enable debug mode to capture HTML snapshots and screenshots at each step:
+
+```bash
+# Set in .env or export directly
+SCRAPER_DEBUG=1 uv run powerschool sync --headless
+```
+
+This saves files to `raw_html/debug/` with numbered prefixes showing the scraper's progression:
+
+- `01_post_login.html/.png` — page state after login
+- `02_before_goto_home.html/.png` — before navigating to home page
+- `03_after_goto_home_networkidle.html/.png` — after page load
+- `04_after_wait_for_content.html/.png` — after waiting for grades table
+- `05_get_students.html/.png` — when parsing the student switcher
+
+### Database Backups
+
+Each sync automatically backs up the database before overwriting. Backups are in `db_backups/` with timestamps (e.g., `powerschool_20260410_171500.db`). To restore a backup:
+
+```bash
+cp db_backups/powerschool_20260410_171500.db powerschool.db
 ```
 
 ### Getting Help
@@ -344,8 +410,13 @@ See `CLAUDE.md` for agent-assisted development workflow.
 
 **Current Features:**
 
-- Core data scraping (grades, assignments, attendance)
-- CLI tools and MCP server
+- Multi-student scraping (`--all-students` iterates through student switcher)
+- Full grade extraction (Q1, Q2, F1, Q3, Q4, F2) with semester grade preference
+- Student listing from database or live from PowerSchool (`powerschool students`)
+- Automatic school name and grade level detection from page content
+- Database backup rotation with configurable retention
+- Debug mode with HTML/screenshot dumps at each scraping step
+- CLI tools and MCP server (24 tools)
 - Streamlit chat interface
 
 **Planned Features:**
