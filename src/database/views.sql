@@ -168,6 +168,7 @@ FROM students s;
 
 -- View: Action Items
 -- Prioritized action items for parents
+DROP VIEW IF EXISTS v_action_items;
 CREATE VIEW IF NOT EXISTS v_action_items AS
 SELECT
     'missing_assignment' AS type,
@@ -175,10 +176,11 @@ SELECT
     s.id AS student_id,
     s.first_name || ' ' || COALESCE(s.last_name, '') AS student_name,
     'Missing: ' || a.assignment_name || ' (' || a.course_name || ')' AS message,
-    'Contact ' || COALESCE(a.teacher_name, 'teacher') || ' about missing ' || a.assignment_name AS suggested_action,
+    'Contact ' || COALESCE(a.teacher_name, c.teacher_name, 'teacher') || ' about missing ' || a.assignment_name AS suggested_action,
     a.due_date AS relevant_date
 FROM assignments a
 JOIN students s ON a.student_id = s.id
+LEFT JOIN courses c ON c.student_id = s.id AND c.course_name = a.course_name
 WHERE a.status = 'Missing'
 
 UNION ALL
