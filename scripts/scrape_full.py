@@ -461,6 +461,9 @@ def scrape_schedule(page: Page) -> list:
                         "course_name": cells[3].get_text(strip=True) if len(cells) > 3 else "",
                         "teacher": cells[4].get_text(strip=True) if len(cells) > 4 else "",
                         "room": cells[5].get_text(strip=True) if len(cells) > 5 else "",
+                        # Enroll/Leave columns (e.g., "08/12/2026" / "05/28/2027")
+                        "enroll": cells[6].get_text(strip=True) if len(cells) > 6 else "",
+                        "leave": cells[7].get_text(strip=True) if len(cells) > 7 else "",
                     }
                     courses.append(course)
 
@@ -555,8 +558,12 @@ def _scrape_current_student(page, all_data: dict):
     # Scrape schedule
     print("\n" + "=" * 40)
     schedule = scrape_schedule(page)
-    if isinstance(all_data["schedule"], list):
-        all_data["schedule"].extend(schedule if isinstance(schedule, list) else [schedule])
+    if isinstance(schedule, list):
+        # Tag each entry with the student it belongs to (required for multi-student syncs)
+        for entry in schedule:
+            entry["student_name"] = student_name_display
+            entry["student_id"] = student_id
+        all_data["schedule"].extend(schedule)
     else:
         all_data["schedule"] = schedule
 

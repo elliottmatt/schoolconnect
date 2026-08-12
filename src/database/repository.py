@@ -441,6 +441,119 @@ class Repository:
         with get_db(self.db_path) as conn:
             conn.execute("DELETE FROM assignments WHERE student_id = ?", (student_id,))
 
+    # ==================== SCHEDULES ====================
+
+    def upsert_schedule(
+        self,
+        student_id: int,
+        course_name: str,
+        expression: Optional[str] = None,
+        term: Optional[str] = None,
+        course_section: Optional[str] = None,
+        teacher_name: Optional[str] = None,
+        room: Optional[str] = None,
+        enroll_date: Optional[str] = None,
+        leave_date: Optional[str] = None,
+    ) -> int:
+        """Insert or update a schedule record.
+
+        Uses UPSERT based on the (student_id, course_name, expression, term,
+        course_section) unique constraint so re-syncing refreshes in place.
+
+        Args:
+            student_id: The student's database ID.
+            course_name: Name of the course.
+            expression: Period/block expression (e.g., "2.8(A)").
+            term: School year term (e.g., "26-27").
+            course_section: Course section code from PowerSchool.
+            teacher_name: Name of the teacher.
+            room: Room number or name.
+            enroll_date: ISO date the student enrolled in the course.
+            leave_date: ISO date the student leaves the course.
+
+        Returns:
+            The database ID of the inserted or updated schedule record.
+        """
+        with get_db(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO schedules (student_id, course_name, expression, term,
+                    course_section, teacher_name, room, enroll_date, leave_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(student_id, course_name, expression, term, course_section)
+                DO UPDATE SET
+                    teacher_name = COALESCE(excluded.teacher_name, teacher_name),
+                    room = COALESCE(excluded.room, room),
+                    enroll_date = COALESCE(excluded.enroll_date, enroll_date),
+                    leave_date = COALESCE(excluded.leave_date, leave_date)
+                RETURNING id
+                """,
+                (
+                    student_id,
+                    course_name,
+                    expression,
+                    term,
+                    course_section,
+                    teacher_name,
+                    room,
+                    enroll_date,
+                    leave_date,
+                ),
+            )
+            return int(cursor.fetchone()["id"])
+
+    def get_schedule(self, student_id: int, term: Optional[str] = None) -> List[Dict]:
+        """Get a student's class schedule.
+
+        Args:
+            student_id: The student's database ID.
+            term: Optional school year term filter (e.g., "26-27").
+
+        Returns:
+            List of schedule dictionaries with keys: course_name, expression,
+            term, course_section, teacher_name, room, enroll_date, leave_date.
+        """
+        with get_db(self.db_path) as conn:
+            if term:
+                cursor = conn.execute(
+                    """
+                    SELECT course_name, expression, term, course_section,
+                           teacher_name, room, enroll_date, leave_date
+                    FROM schedules
+                    WHERE student_id = ? AND term = ?
+                    ORDER BY expression
+                    """,
+                    (student_id, term),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    SELECT course_name, expression, term, course_section,
+                           teacher_name, room, enroll_date, leave_date
+                    FROM schedules
+                    WHERE student_id = ?
+                    ORDER BY expression
+                    """,
+                    (student_id,),
+                )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_schedule_terms(self, student_id: int) -> List[str]:
+        """List distinct schedule terms for a student (e.g., school years).
+
+        Args:
+            student_id: The student's database ID.
+
+        Returns:
+            Sorted list of term strings.
+        """
+        with get_db(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT DISTINCT term FROM schedules WHERE student_id = ? ORDER BY term DESC",
+                (student_id,),
+            )
+            return [row["term"] for row in cursor.fetchall()]
+
     # ==================== ATTENDANCE ====================
 
     def add_attendance_summary(

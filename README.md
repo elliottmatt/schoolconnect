@@ -140,6 +140,18 @@ Results are split into **Overdue** (past due date) and **Not Yet Due** (no score
 powerschool report -s "StudentName"
 ```
 
+### View Schedule
+
+```bash
+# Show a student's class schedule (most recent school year by default)
+powerschool schedule -s "StudentName"
+
+# Show a specific school year
+powerschool schedule -s "StudentName" --term 26-27
+```
+
+Displays each class with its period/block, teacher, room, and enrollment dates. Schedule data is captured during every sync and stored locally.
+
 ### Check Status
 
 ```bash

@@ -174,6 +174,42 @@ def _load_scraped_data_inner(repo: Repository, data: dict):
             )
             print(f"    Grade {term_name}: {grade}")
 
+    # Insert schedules
+    print("\n=== LOADING SCHEDULES ===")
+    schedule_entries = data.get("schedule", [])
+    schedule_count = 0
+    for entry in schedule_entries:
+        sid = get_student_db_id(entry)
+        course_name = entry.get("course_name")
+        if not course_name:
+            continue
+
+        # Normalize enroll/leave dates to ISO format if present
+        def _to_iso(value):
+            if not value:
+                return None
+            for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+                except ValueError:
+                    continue
+            return None
+
+        repo.upsert_schedule(
+            student_id=sid,
+            course_name=course_name,
+            expression=entry.get("expression"),
+            term=entry.get("term") or "YR",
+            course_section=entry.get("course_section"),
+            teacher_name=entry.get("teacher") or entry.get("teacher_name"),
+            room=entry.get("room"),
+            enroll_date=_to_iso(entry.get("enroll_date") or entry.get("enroll")),
+            leave_date=_to_iso(entry.get("leave_date") or entry.get("leave")),
+        )
+        schedule_count += 1
+
+    print(f"Loaded {schedule_count} schedule entries")
+
     # Insert assignments
     print("\n=== LOADING ASSIGNMENTS ===")
     assignments = data.get("assignments", [])
