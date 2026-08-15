@@ -150,7 +150,7 @@ powerschool schedule -s "StudentName"
 powerschool schedule -s "StudentName" --term 26-27
 ```
 
-Displays each class with its period/block, teacher, room, and enrollment dates. Schedule data is captured during every sync and stored locally.
+Displays each class with its period/block, teacher, room, and enrollment/leave dates, ordered by period. Schedule data is captured during every sync and stored locally.
 
 ### Check Status
 

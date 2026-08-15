@@ -609,24 +609,34 @@ async def handle_schedule(
     if not student:
         return [TextContent(type="text", text=f"Student not found: {student_name}")]
 
+    # Default to the most recent school year, falling back to every entry when
+    # none of them recorded a term.
     if term is None:
         terms = repo.get_schedule_terms(student["id"])
-        if not terms:
-            return [TextContent(type="text", text=f"No schedule found for {student_name}. Run 'powerschool sync' first.")]
-        term = terms[0]
+        term = terms[0] if terms else None
 
     schedule_list = repo.get_schedule(student["id"], term=term)
     if not schedule_list:
-        return [TextContent(type="text", text=f"No schedule found for {student_name} (term {term}). Run 'powerschool sync' first.")]
+        scope = f" (term {term})" if term else ""
+        return [
+            TextContent(
+                type="text",
+                text=f"No schedule found for {student_name}{scope}. Run 'powerschool sync' first.",
+            )
+        ]
 
-    result = f"## Schedule - {student['first_name']} ({term})\n\n"
+    result = f"## Schedule - {student['first_name']} ({term or 'all terms'})\n\n"
     for entry in schedule_list:
         period = entry.get("expression") or "-"
         course = entry.get("course_name", "Unknown")
         teacher = entry.get("teacher_name") or "-"
         room = entry.get("room") or "-"
-        enrolled = entry.get("enroll_date") or "-"
-        result += f"- **{period}**: {course} — {teacher} ({room}), enrolled {enrolled}\n"
+        result += f"- **{period}**: {course} — {teacher} ({room})"
+        if entry.get("enroll_date"):
+            result += f", enrolled {entry['enroll_date']}"
+        if entry.get("leave_date"):
+            result += f", through {entry['leave_date']}"
+        result += "\n"
 
     return [TextContent(type="text", text=result)]
 

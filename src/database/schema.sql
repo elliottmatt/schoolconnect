@@ -51,9 +51,12 @@ CREATE TABLE courses (
 CREATE TABLE schedules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     student_id INTEGER NOT NULL,
-    expression TEXT,                       -- Period/block (e.g., "2.8(A)")
-    term TEXT,                             -- School year (e.g., "26-27")
-    course_section TEXT,                   -- Course section code (e.g., "08037G0708-6")
+    -- The four key columns below default to '' rather than NULL: SQLite treats
+    -- NULLs as distinct in a UNIQUE constraint, which would let re-syncs insert
+    -- duplicate rows instead of updating in place.
+    expression TEXT NOT NULL DEFAULT '',   -- Period/block (e.g., "2.8(A)")
+    term TEXT NOT NULL DEFAULT '',         -- School year (e.g., "26-27")
+    course_section TEXT NOT NULL DEFAULT '', -- Course section code (e.g., "08037G0708-6")
     course_name TEXT NOT NULL,
     teacher_name TEXT,
     room TEXT,

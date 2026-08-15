@@ -13,10 +13,26 @@ Example:
         grades = repo.get_current_grades(student["id"])
 """
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .connection import DB_PATH, get_db
+
+
+def _expression_sort_key(expression: Optional[str]) -> tuple:
+    """Sort key that orders period expressions numerically.
+
+    PowerSchool expressions look like "2.8(A)" or "178(A)", where the leading
+    integer is the period. A plain text sort puts period 10 before period 2, so
+    the leading integer is compared numerically and the raw text breaks ties.
+    Expressions without a leading number sort last.
+    """
+    text = expression or ""
+    match = re.match(r"\d+", text)
+    if match:
+        return (0, int(match.group()), text)
+    return (1, 0, text)
 
 
 class Repository:
@@ -459,6 +475,8 @@ class Repository:
 
         Uses UPSERT based on the (student_id, course_name, expression, term,
         course_section) unique constraint so re-syncing refreshes in place.
+        The key columns are normalized to "" when missing, because SQLite
+        treats NULLs as distinct and would otherwise insert a duplicate row.
 
         Args:
             student_id: The student's database ID.
@@ -482,18 +500,19 @@ class Repository:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(student_id, course_name, expression, term, course_section)
                 DO UPDATE SET
-                    teacher_name = COALESCE(excluded.teacher_name, teacher_name),
-                    room = COALESCE(excluded.room, room),
-                    enroll_date = COALESCE(excluded.enroll_date, enroll_date),
-                    leave_date = COALESCE(excluded.leave_date, leave_date)
+                    teacher_name = excluded.teacher_name,
+                    room = excluded.room,
+                    enroll_date = excluded.enroll_date,
+                    leave_date = excluded.leave_date,
+                    recorded_at = CURRENT_TIMESTAMP
                 RETURNING id
                 """,
                 (
                     student_id,
                     course_name,
-                    expression,
-                    term,
-                    course_section,
+                    expression or "",
+                    term or "",
+                    course_section or "",
                     teacher_name,
                     room,
                     enroll_date,
@@ -505,51 +524,54 @@ class Repository:
     def get_schedule(self, student_id: int, term: Optional[str] = None) -> List[Dict]:
         """Get a student's class schedule.
 
+        Results are ordered by period, comparing the leading number in the
+        expression numerically so period 10 sorts after period 2.
+
         Args:
             student_id: The student's database ID.
-            term: Optional school year term filter (e.g., "26-27").
+            term: Optional school year term filter (e.g., "26-27"). Falsy
+                values return every term.
 
         Returns:
             List of schedule dictionaries with keys: course_name, expression,
             term, course_section, teacher_name, room, enroll_date, leave_date.
         """
+        sql = """
+            SELECT course_name, expression, term, course_section,
+                   teacher_name, room, enroll_date, leave_date
+            FROM schedules
+            WHERE student_id = ?
+        """
+        params: tuple = (student_id,)
+        if term:
+            sql += " AND term = ?"
+            params += (term,)
+
         with get_db(self.db_path) as conn:
-            if term:
-                cursor = conn.execute(
-                    """
-                    SELECT course_name, expression, term, course_section,
-                           teacher_name, room, enroll_date, leave_date
-                    FROM schedules
-                    WHERE student_id = ? AND term = ?
-                    ORDER BY expression
-                    """,
-                    (student_id, term),
-                )
-            else:
-                cursor = conn.execute(
-                    """
-                    SELECT course_name, expression, term, course_section,
-                           teacher_name, room, enroll_date, leave_date
-                    FROM schedules
-                    WHERE student_id = ?
-                    ORDER BY expression
-                    """,
-                    (student_id,),
-                )
-            return [dict(row) for row in cursor.fetchall()]
+            cursor = conn.execute(sql, params)
+            rows = [dict(row) for row in cursor.fetchall()]
+
+        return sorted(rows, key=lambda r: _expression_sort_key(r["expression"]))
 
     def get_schedule_terms(self, student_id: int) -> List[str]:
         """List distinct schedule terms for a student (e.g., school years).
+
+        Entries with no recorded term are omitted, so callers can safely treat
+        the first element as the most recent real school year.
 
         Args:
             student_id: The student's database ID.
 
         Returns:
-            Sorted list of term strings.
+            List of term strings, newest first. Empty if no entry has a term.
         """
         with get_db(self.db_path) as conn:
             cursor = conn.execute(
-                "SELECT DISTINCT term FROM schedules WHERE student_id = ? ORDER BY term DESC",
+                """
+                SELECT DISTINCT term FROM schedules
+                WHERE student_id = ? AND term IS NOT NULL AND term != ''
+                ORDER BY term DESC
+                """,
                 (student_id,),
             )
             return [row["term"] for row in cursor.fetchall()]

@@ -242,25 +242,26 @@ def schedule(student: str, term: str | None):
             console.print(f"[yellow]Available students: {names}[/yellow]")
         return
 
+    # Default to the most recent school year, falling back to every entry when
+    # none of them recorded a term.
     if term is None:
         terms = repo.get_schedule_terms(s["id"])
-        if not terms:
-            console.print(f"[yellow]No schedule found for {student}. Run 'powerschool sync' first.[/yellow]")
-            return
-        term = terms[0]
+        term = terms[0] if terms else None
 
     schedule_list = repo.get_schedule(s["id"], term=term)
 
     if not schedule_list:
-        console.print(f"[yellow]No schedule found for {student} (term {term}). Run 'powerschool sync' first.[/yellow]")
+        scope = f" (term {term})" if term else ""
+        console.print(f"[yellow]No schedule found for {student}{scope}. Run 'powerschool sync' first.[/yellow]")
         return
 
-    table = Table(title=f"Schedule - {s['first_name']} ({term})")
+    table = Table(title=f"Schedule - {s['first_name']} ({term or 'all terms'})")
     table.add_column("Period")
     table.add_column("Course")
     table.add_column("Teacher")
     table.add_column("Room")
     table.add_column("Enrolled", justify="center")
+    table.add_column("Leaves", justify="center")
 
     for entry in schedule_list:
         table.add_row(
@@ -269,6 +270,7 @@ def schedule(student: str, term: str | None):
             entry.get("teacher_name") or "-",
             entry.get("room") or "-",
             entry.get("enroll_date") or "-",
+            entry.get("leave_date") or "-",
         )
 
     console.print(table)
