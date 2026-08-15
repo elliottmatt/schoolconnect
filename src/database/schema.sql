@@ -12,6 +12,7 @@ DROP TABLE IF EXISTS attendance_summary;
 DROP TABLE IF EXISTS assignment_details;
 DROP TABLE IF EXISTS course_categories;
 DROP TABLE IF EXISTS assignments;
+DROP TABLE IF EXISTS schedules;
 DROP TABLE IF EXISTS grades;
 DROP TABLE IF EXISTS courses;
 DROP TABLE IF EXISTS students;
@@ -45,6 +46,28 @@ CREATE TABLE courses (
     FOREIGN KEY (student_id) REFERENCES students(id),
     UNIQUE(student_id, course_name, expression, term)
 );
+
+-- Schedules table (class schedule from myschedule.html)
+CREATE TABLE schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER NOT NULL,
+    -- The four key columns below default to '' rather than NULL: SQLite treats
+    -- NULLs as distinct in a UNIQUE constraint, which would let re-syncs insert
+    -- duplicate rows instead of updating in place.
+    expression TEXT NOT NULL DEFAULT '',   -- Period/block (e.g., "2.8(A)")
+    term TEXT NOT NULL DEFAULT '',         -- School year (e.g., "26-27")
+    course_section TEXT NOT NULL DEFAULT '', -- Course section code (e.g., "08037G0708-6")
+    course_name TEXT NOT NULL,
+    teacher_name TEXT,
+    room TEXT,
+    enroll_date DATE,                      -- First day of enrollment
+    leave_date DATE,                       -- Last day of enrollment
+    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (student_id) REFERENCES students(id),
+    UNIQUE(student_id, course_name, expression, term, course_section)
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_student ON schedules(student_id);
+CREATE INDEX IF NOT EXISTS idx_schedules_course ON schedules(course_name);
 
 -- Grades table (historical grades by term)
 CREATE TABLE grades (

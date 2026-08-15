@@ -171,6 +171,25 @@ async def list_tools() -> list[Tool]:
                 "required": ["student_name", "course_name"],
             },
         ),
+        # Schedule Tools
+        Tool(
+            name="get_schedule",
+            description="Get a student's class schedule including period, course name, teacher, room, and enrollment dates. Optionally filter by school year term (e.g., '26-27').",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "student_name": {
+                        "type": "string",
+                        "description": "Student's first name",
+                    },
+                    "term": {
+                        "type": "string",
+                        "description": "Optional school year term (e.g., 26-27). Defaults to most recent.",
+                    },
+                },
+                "required": ["student_name"],
+            },
+        ),
         # Attendance Tools
         Tool(
             name="get_attendance_summary",
@@ -469,6 +488,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return await handle_course_score_details(
                 repo, arguments["student_name"], arguments["course_name"]
             )
+        elif name == "get_schedule":
+            return await handle_schedule(
+                repo,
+                arguments["student_name"],
+                arguments.get("term"),
+            )
         elif name == "get_attendance_summary":
             return await handle_attendance_summary(repo, arguments["student_name"])
         elif name == "get_attendance_alerts":
@@ -572,6 +597,46 @@ async def handle_student_summary(repo: Repository, student_name: str) -> list[Te
             if summary.get("attendance_rate"):
                 result += f"- **Attendance Rate**: {summary['attendance_rate']:.1f}%\n"
             result += "\n"
+
+    return [TextContent(type="text", text=result)]
+
+
+async def handle_schedule(
+    repo: Repository, student_name: str, term: str | None = None
+) -> list[TextContent]:
+    """Get a student's class schedule."""
+    student = repo.get_student_by_name(student_name)
+    if not student:
+        return [TextContent(type="text", text=f"Student not found: {student_name}")]
+
+    # Default to the most recent school year, falling back to every entry when
+    # none of them recorded a term.
+    if term is None:
+        terms = repo.get_schedule_terms(student["id"])
+        term = terms[0] if terms else None
+
+    schedule_list = repo.get_schedule(student["id"], term=term)
+    if not schedule_list:
+        scope = f" (term {term})" if term else ""
+        return [
+            TextContent(
+                type="text",
+                text=f"No schedule found for {student_name}{scope}. Run 'powerschool sync' first.",
+            )
+        ]
+
+    result = f"## Schedule - {student['first_name']} ({term or 'all terms'})\n\n"
+    for entry in schedule_list:
+        period = entry.get("expression") or "-"
+        course = entry.get("course_name", "Unknown")
+        teacher = entry.get("teacher_name") or "-"
+        room = entry.get("room") or "-"
+        result += f"- **{period}**: {course} — {teacher} ({room})"
+        if entry.get("enroll_date"):
+            result += f", enrolled {entry['enroll_date']}"
+        if entry.get("leave_date"):
+            result += f", through {entry['leave_date']}"
+        result += "\n"
 
     return [TextContent(type="text", text=result)]
 

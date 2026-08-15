@@ -228,6 +228,60 @@ def grades(student: str):
 
 @cli.command()
 @click.option("--student", "-s", required=True, help="Student name")
+@click.option(
+    "--term", "-t", default=None, help="School year term (e.g., 26-27). Defaults to most recent."
+)
+def schedule(student: str, term: str | None):
+    """Show a student's class schedule."""
+    repo = Repository()
+
+    s = repo.get_student_by_name(student)
+    if not s:
+        console.print(f"[red]Student not found: {student}[/red]")
+        students = repo.get_students()
+        if students:
+            names = ", ".join([st["first_name"] for st in students])
+            console.print(f"[yellow]Available students: {names}[/yellow]")
+        return
+
+    # Default to the most recent school year, falling back to every entry when
+    # none of them recorded a term.
+    if term is None:
+        terms = repo.get_schedule_terms(s["id"])
+        term = terms[0] if terms else None
+
+    schedule_list = repo.get_schedule(s["id"], term=term)
+
+    if not schedule_list:
+        scope = f" (term {term})" if term else ""
+        console.print(
+            f"[yellow]No schedule found for {student}{scope}. Run 'powerschool sync' first.[/yellow]"
+        )
+        return
+
+    table = Table(title=f"Schedule - {s['first_name']} ({term or 'all terms'})")
+    table.add_column("Period")
+    table.add_column("Course")
+    table.add_column("Teacher")
+    table.add_column("Room")
+    table.add_column("Enrolled", justify="center")
+    table.add_column("Leaves", justify="center")
+
+    for entry in schedule_list:
+        table.add_row(
+            entry.get("expression") or "-",
+            entry["course_name"][:45],
+            entry.get("teacher_name") or "-",
+            entry.get("room") or "-",
+            entry.get("enroll_date") or "-",
+            entry.get("leave_date") or "-",
+        )
+
+    console.print(table)
+
+
+@cli.command()
+@click.option("--student", "-s", required=True, help="Student name")
 def report(student: str):
     """Generate weekly report for a student."""
     repo = Repository()

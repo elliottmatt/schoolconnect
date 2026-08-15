@@ -22,6 +22,21 @@ from src.database.repository import Repository
 DB_BACKUP_COUNT = int(os.getenv("DB_BACKUP_COUNT", "5"))
 
 
+def to_iso_date(value):
+    """Normalize a scraped date to ISO format, or None if it can't be parsed.
+
+    PowerSchool renders dates as MM/DD/YYYY; already-ISO values pass through.
+    """
+    if not value:
+        return None
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
 def _get_backup_dir() -> Path:
     """Get the database backup directory."""
     backup_dir = DB_PATH.parent / "db_backups"
@@ -173,6 +188,31 @@ def _load_scraped_data_inner(repo: Repository, data: dict):
                 tardies=tardies,
             )
             print(f"    Grade {term_name}: {grade}")
+
+    # Insert schedules
+    print("\n=== LOADING SCHEDULES ===")
+    schedule_entries = data.get("schedule", [])
+    schedule_count = 0
+    for entry in schedule_entries:
+        sid = get_student_db_id(entry)
+        course_name = entry.get("course_name")
+        if not course_name:
+            continue
+
+        repo.upsert_schedule(
+            student_id=sid,
+            course_name=course_name,
+            expression=entry.get("expression"),
+            term=entry.get("term"),
+            course_section=entry.get("course_section"),
+            teacher_name=entry.get("teacher") or entry.get("teacher_name"),
+            room=entry.get("room"),
+            enroll_date=to_iso_date(entry.get("enroll_date") or entry.get("enroll")),
+            leave_date=to_iso_date(entry.get("leave_date") or entry.get("leave")),
+        )
+        schedule_count += 1
+
+    print(f"Loaded {schedule_count} schedule entries")
 
     # Insert assignments
     print("\n=== LOADING ASSIGNMENTS ===")

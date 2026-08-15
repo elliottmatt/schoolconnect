@@ -434,6 +434,82 @@ def scrape_attendance_history(page: Page, home_attendance: dict) -> dict:
     return data
 
 
+# Maps our field names to the header text PowerSchool uses on myschedule.html.
+# Column order is resolved from the header row rather than hardcoded, so an
+# added or reordered column doesn't silently shift every field.
+SCHEDULE_COLUMNS = {
+    "expression": "exp",
+    "term": "trm",
+    "course_section": "crs-sec",
+    "course_name": "course name",
+    "teacher": "teacher",
+    "room": "room",
+    "enroll": "enroll",
+    "leave": "leave",
+}
+
+# Fallback positions, used only when the header row is missing or unrecognized.
+SCHEDULE_COLUMN_FALLBACK = {
+    "expression": 0,
+    "term": 1,
+    "course_section": 2,
+    "course_name": 3,
+    "teacher": 4,
+    "room": 5,
+    "enroll": 6,
+    "leave": 7,
+}
+
+
+def _cell_text(cells, index) -> str:
+    """Text of cells[index], or "" when the column is absent from this row."""
+    if index is None or index >= len(cells):
+        return ""
+    return cells[index].get_text(strip=True)
+
+
+def parse_schedule(html: str) -> list:
+    """Parse the schedule table out of myschedule.html.
+
+    Split out from the Playwright navigation so it can be tested against saved
+    HTML fixtures.
+
+    Args:
+        html: Full page HTML from the schedule page.
+
+    Returns:
+        List of course dicts keyed by SCHEDULE_COLUMNS. Missing columns yield "".
+    """
+    soup = BeautifulSoup(html, "lxml")
+    table = soup.select_one("#results")
+    if not table:
+        return []
+
+    # Resolve column positions from the header row.
+    header_cells = [th.get_text(strip=True).lower() for th in table.select("th")]
+    columns = {}
+    for field, header in SCHEDULE_COLUMNS.items():
+        if header in header_cells:
+            columns[field] = header_cells.index(header)
+    if not columns:
+        columns = dict(SCHEDULE_COLUMN_FALLBACK)
+
+    courses = []
+    for row in table.select("tbody tr, tr"):
+        cells = row.select("td")
+        if len(cells) < 6:
+            continue
+
+        values = {field: _cell_text(cells, columns.get(field)) for field in SCHEDULE_COLUMNS}
+        expression = values["expression"]
+        if not expression or expression.startswith("Exp"):
+            continue
+
+        courses.append(values)
+
+    return courses
+
+
 def scrape_schedule(page: Page) -> list:
     """Scrape schedule page."""
     print("Scraping schedule...")
@@ -442,30 +518,8 @@ def scrape_schedule(page: Page) -> list:
     page.wait_for_timeout(2000)
 
     html = page.content()
-    soup = BeautifulSoup(html, "lxml")
-
-    courses = []
-    table = soup.select_one("#results")
-
-    if table:
-        rows = table.select("tbody tr, tr")
-        for row in rows:
-            cells = row.select("td")
-            if len(cells) >= 6:
-                expression = cells[0].get_text(strip=True)
-                if expression and not expression.startswith("Exp"):
-                    course = {
-                        "expression": expression,
-                        "term": cells[1].get_text(strip=True) if len(cells) > 1 else "",
-                        "course_section": cells[2].get_text(strip=True) if len(cells) > 2 else "",
-                        "course_name": cells[3].get_text(strip=True) if len(cells) > 3 else "",
-                        "teacher": cells[4].get_text(strip=True) if len(cells) > 4 else "",
-                        "room": cells[5].get_text(strip=True) if len(cells) > 5 else "",
-                    }
-                    courses.append(course)
-
     (RAW_HTML_DIR / "schedule.html").write_text(html)
-    return courses
+    return parse_schedule(html)
 
 
 def _scrape_current_student(page, all_data: dict):
@@ -555,10 +609,11 @@ def _scrape_current_student(page, all_data: dict):
     # Scrape schedule
     print("\n" + "=" * 40)
     schedule = scrape_schedule(page)
-    if isinstance(all_data["schedule"], list):
-        all_data["schedule"].extend(schedule if isinstance(schedule, list) else [schedule])
-    else:
-        all_data["schedule"] = schedule
+    # Tag each entry with the student it belongs to (required for multi-student syncs)
+    for entry in schedule:
+        entry["student_name"] = student_name_display
+        entry["student_id"] = student_id
+    all_data["schedule"].extend(schedule)
 
     # Scrape attendance — totals come from the home page, history page adds context
     print("\n" + "=" * 40)
