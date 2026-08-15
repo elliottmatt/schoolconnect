@@ -139,7 +139,9 @@ def test_missing_term_does_not_create_a_bogus_term(repo: Repository) -> None:
 
 def test_reloading_same_data_does_not_duplicate(repo: Repository) -> None:
     """Loading twice into an existing database refreshes rows in place."""
-    payload = _scraped([_entry(), _entry(course_name="Band", expression="5.8(A)", course_section="")])
+    payload = _scraped(
+        [_entry(), _entry(course_name="Band", expression="5.8(A)", course_section="")]
+    )
     _load_scraped_data_inner(repo, payload)
     _load_scraped_data_inner(repo, payload)
 

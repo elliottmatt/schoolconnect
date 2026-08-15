@@ -228,7 +228,9 @@ def grades(student: str):
 
 @cli.command()
 @click.option("--student", "-s", required=True, help="Student name")
-@click.option("--term", "-t", default=None, help="School year term (e.g., 26-27). Defaults to most recent.")
+@click.option(
+    "--term", "-t", default=None, help="School year term (e.g., 26-27). Defaults to most recent."
+)
 def schedule(student: str, term: str | None):
     """Show a student's class schedule."""
     repo = Repository()
@@ -252,7 +254,9 @@ def schedule(student: str, term: str | None):
 
     if not schedule_list:
         scope = f" (term {term})" if term else ""
-        console.print(f"[yellow]No schedule found for {student}{scope}. Run 'powerschool sync' first.[/yellow]")
+        console.print(
+            f"[yellow]No schedule found for {student}{scope}. Run 'powerschool sync' first.[/yellow]"
+        )
         return
 
     table = Table(title=f"Schedule - {s['first_name']} ({term or 'all terms'})")

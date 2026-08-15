@@ -21,9 +21,7 @@ pytestmark = pytest.mark.unit
 def _schedule_html(headers: list[str], rows: list[list[str]]) -> str:
     """Build a minimal myschedule.html-shaped page."""
     header_html = "".join(f"<th>{h}</th>" for h in headers)
-    row_html = "".join(
-        "<tr>" + "".join(f"<td>{c}</td>" for c in row) + "</tr>" for row in rows
-    )
+    row_html = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in row) + "</tr>" for row in rows)
     return f"<html><body><table id='results'><tr>{header_html}</tr>{row_html}</table></body></html>"
 
 
@@ -61,7 +59,17 @@ class TestParseSchedule:
 
     def test_columns_resolved_by_header_not_position(self):
         """A column inserted upstream must not shift every field by one."""
-        headers = ["Exp", "Trm", "Crs-Sec", "Course Name", "Credit", "Teacher", "Room", "Enroll", "Leave"]
+        headers = [
+            "Exp",
+            "Trm",
+            "Crs-Sec",
+            "Course Name",
+            "Credit",
+            "Teacher",
+            "Room",
+            "Enroll",
+            "Leave",
+        ]
         row = STANDARD_ROW[:4] + ["1.0"] + STANDARD_ROW[4:]
 
         courses = parse_schedule(_schedule_html(headers, [row]))
