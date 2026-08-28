@@ -16,7 +16,11 @@ SELECT
     a.due_date,
     a.term,
     a.score,
-    julianday('now') - julianday(a.due_date) AS days_overdue,
+    -- Whole days late, computed local-date to local-date. julianday('now') is UTC
+    -- while due_date is a bare LOCAL date, which used to flip assignments to
+    -- "overdue" the evening before they were due. 0 = due today, negative = future.
+    CAST(julianday(date('now', 'localtime')) - julianday(date(a.due_date)) AS INTEGER)
+        AS days_overdue,
     a.recorded_at
 FROM assignments a
 JOIN students s ON a.student_id = s.id
@@ -125,13 +129,15 @@ SELECT
     a.assignment_name,
     a.category,
     a.due_date,
-    julianday(a.due_date) - julianday('now') AS days_until_due,
+    -- Local-date to local-date, same reasoning as v_missing_assignments.days_overdue.
+    CAST(julianday(date(a.due_date)) - julianday(date('now', 'localtime')) AS INTEGER)
+        AS days_until_due,
     a.status,
     a.term
 FROM assignments a
 JOIN students s ON a.student_id = s.id
-WHERE a.due_date >= date('now')
-  AND a.due_date <= date('now', '+14 days')
+WHERE a.due_date >= date('now', 'localtime')
+  AND a.due_date <= date('now', 'localtime', '+14 days')
   AND a.status != 'Collected'
 ORDER BY a.due_date ASC;
 

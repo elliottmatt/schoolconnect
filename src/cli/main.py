@@ -31,8 +31,11 @@ from rich.table import Table  # noqa: E402
 
 from src.database.connection import init_database, verify_database  # noqa: E402
 from src.database.repository import Repository  # noqa: E402
+from src.reporting import is_due_today, is_overdue, whole_days_overdue  # noqa: E402
 
 console = Console()
+# Errors go to stderr so cron/watchdog wrappers can separate them from report output.
+err_console = Console(stderr=True)
 
 
 @click.group()
@@ -99,10 +102,16 @@ def sync(headless: bool, student: str, all_students: bool):
         console.print("[green]✓ Sync complete![/green]")
 
     except ImportError as e:
-        console.print(f"[red]Error: Scraper not available. {e}[/red]")
-        console.print("Run manually: python scripts/scrape_full.py && python scripts/load_data.py")
+        # Failures MUST be loud and non-zero: the cron watchdog treats exit 0 with
+        # empty output as "all good", so a silent failure hides an outage forever.
+        err_console.print(f"[red]Error: Scraper not available. {e}[/red]")
+        err_console.print(
+            "Run manually: python scripts/scrape_full.py && python scripts/load_data.py"
+        )
+        sys.exit(1)
     except Exception as e:
-        console.print(f"[red]Sync failed: {e}[/red]")
+        err_console.print(f"[red]Sync failed: {e}[/red]")
+        sys.exit(1)
 
 
 @cli.command()
@@ -116,13 +125,16 @@ def missing(student: str, ignore_future: bool, ignore_older_than: int):
     def filter_list(missing_list: list) -> list:
         result = missing_list
         if ignore_future:
-            result = [m for m in result if (m.get("days_overdue") or 0) > 0]
+            # Due today is not "future" — it is actionable, so it stays.
+            result = [m for m in result if whole_days_overdue(m.get("days_overdue")) >= 0]
         if ignore_older_than is not None:
-            result = [m for m in result if (m.get("days_overdue") or 0) <= ignore_older_than]
+            result = [
+                m for m in result if whole_days_overdue(m.get("days_overdue")) <= ignore_older_than
+            ]
         return result
 
     def print_missing_for(name: str, missing_list: list):
-        """Print missing assignments for one student, split into overdue / not-yet-due."""
+        """Print missing assignments for one student, split into overdue / today / upcoming."""
         console.print(f"\n[bold cyan]=== {name} ===[/bold cyan]")
 
         filtered = filter_list(missing_list)
@@ -131,8 +143,9 @@ def missing(student: str, ignore_future: bool, ignore_older_than: int):
             console.print("[green]  nothing missing[/green]")
             return
 
-        overdue = [m for m in filtered if (m.get("days_overdue") or 0) > 0]
-        not_yet_due = [m for m in filtered if (m.get("days_overdue") or 0) <= 0]
+        overdue = [m for m in filtered if is_overdue(m.get("days_overdue"))]
+        due_today = [m for m in filtered if is_due_today(m.get("days_overdue"))]
+        not_yet_due = [m for m in filtered if whole_days_overdue(m.get("days_overdue")) < 0]
 
         def make_table(rows, title_str, name_style):
             t = Table(title=title_str, show_lines=False)
@@ -142,8 +155,8 @@ def missing(student: str, ignore_future: bool, ignore_older_than: int):
             t.add_column("Due Date")
             t.add_column("Days Overdue", justify="right")
             for m in rows:
-                days = m.get("days_overdue") or 0
-                days_str = f"{int(days)}" if days > 0 else "-"
+                days = whole_days_overdue(m.get("days_overdue"))
+                days_str = f"{days}" if days > 0 else "-"
                 score = m.get("score") or "--"
                 t.add_row(
                     m["assignment_name"][:40],
@@ -157,6 +170,10 @@ def missing(student: str, ignore_future: bool, ignore_older_than: int):
         if overdue:
             console.print(make_table(overdue, "Overdue", "red"))
             console.print(f"  [bold red]{len(overdue)} overdue[/bold red]")
+
+        if due_today:
+            console.print(make_table(due_today, "Due Today", "yellow"))
+            console.print(f"  [yellow]{len(due_today)} due today[/yellow]")
 
         if not_yet_due:
             console.print(make_table(not_yet_due, "Not Yet Due (no score yet)", "yellow"))
