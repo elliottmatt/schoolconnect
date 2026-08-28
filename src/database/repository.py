@@ -436,8 +436,8 @@ class Repository:
                 """
                 SELECT * FROM assignments
                 WHERE student_id = ?
-                  AND due_date >= date('now')
-                  AND due_date <= date('now', '+' || ? || ' days')
+                  AND due_date >= date('now', 'localtime')
+                  AND due_date <= date('now', 'localtime', '+' || ? || ' days')
                   AND status != 'Collected'
                 ORDER BY due_date ASC
                 """,

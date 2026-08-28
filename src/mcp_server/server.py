@@ -25,6 +25,7 @@ from mcp.types import TextContent, Tool  # noqa: E402
 
 from src.database.connection import verify_database  # noqa: E402
 from src.database.repository import Repository  # noqa: E402
+from src.reporting import days_overdue_label, whole_days_overdue  # noqa: E402
 
 # Initialize MCP server
 app = Server("powerschool-portal")
@@ -713,7 +714,7 @@ async def handle_missing_assignments(repo: Repository, student_name: str) -> lis
     result = "## Missing Assignments\n\n"
     for m in missing:
         days = m.get("days_overdue", 0)
-        overdue = f" ({int(days)} days overdue)" if days and days > 0 else ""
+        overdue = f" ({days_overdue_label(days)})" if whole_days_overdue(days) >= 0 else ""
         result += f"- **{m['assignment_name']}**{overdue}\n"
         result += f"  - Course: {m['course_name']}\n"
         result += f"  - Teacher: {m.get('teacher_name', 'N/A')}\n"
