@@ -117,7 +117,13 @@ def sync(headless: bool, student: str, all_students: bool):
 @cli.command()
 @click.option("--student", "-s", default="all", help="Student name (default: all)")
 @click.option("--ignore-future", is_flag=True, help="Hide assignments not yet past due date")
-@click.option("--ignore-older-than", type=int, default=None, metavar="DAYS", help="Hide assignments overdue more than N days")
+@click.option(
+    "--ignore-older-than",
+    type=int,
+    default=None,
+    metavar="DAYS",
+    help="Hide assignments overdue more than N days",
+)
 def missing(student: str, ignore_future: bool, ignore_older_than: int):
     """Show missing assignments."""
     repo = Repository()
@@ -422,7 +428,9 @@ def students(live: bool, headless: bool):
 
             for s in student_list:
                 selected = "✓" if s.get("selected") else ""
-                table.add_row(s["name"], s.get("student_number", ""), s["id"], f"[green]{selected}[/green]")
+                table.add_row(
+                    s["name"], s.get("student_number", ""), s["id"], f"[green]{selected}[/green]"
+                )
 
             console.print(table)
 
@@ -444,8 +452,8 @@ def students(live: bool, headless: bool):
         table.add_column("School")
 
         for s in student_list:
-            name = s['first_name']
-            last = s.get('last_name')
+            name = s["first_name"]
+            last = s.get("last_name")
             if last:
                 name = f"{name} {last}"
             table.add_row(name, str(s.get("grade_level") or ""), s.get("school_name") or "")
@@ -482,8 +490,10 @@ def status():
 
         sync_status = sync.get("status", "unknown")
         status_icon = (
-            "[green]✅ completed[/green]" if sync_status == "completed"
-            else "[red]❌ failed[/red]" if sync_status == "failed"
+            "[green]✅ completed[/green]"
+            if sync_status == "completed"
+            else "[red]❌ failed[/red]"
+            if sync_status == "failed"
             else f"[yellow]{sync_status}[/yellow]"
         )
         console.print(f"Last sync:   {completed_at}  {status_icon}  ({age_str})")
@@ -492,7 +502,9 @@ def status():
         if sync.get("error_message"):
             console.print(f"[red]Error:       {sync['error_message']}[/red]")
     else:
-        console.print("[yellow]Last sync:   never — run `sync` to pull data from PowerSchool[/yellow]")
+        console.print(
+            "[yellow]Last sync:   never — run `sync` to pull data from PowerSchool[/yellow]"
+        )
 
     # Students overview
     students = repo.get_students()
