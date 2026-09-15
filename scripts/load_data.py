@@ -68,6 +68,31 @@ def _backup_database():
 
 def load_scraped_data():
     """Load data from full_data.json into the database."""
+    # Read and validate the scrape BEFORE touching the database: init_database(
+    # force=True) recreates the schema, so loading an empty scrape would wipe
+    # every row. A scrape that found no students or no assignments means the
+    # scrape failed (login did not authenticate, session dropped, page changed)
+    # — refuse loudly instead of destroying good data.
+    data_file = Path(__file__).parent.parent / "raw_html" / "full_data.json"
+    if not data_file.exists():
+        print(f"ERROR: Data file not found: {data_file}")
+        print("Run scripts/scrape_full.py first")
+        sys.exit(1)
+
+    with open(data_file) as f:
+        data = json.load(f)
+
+    students = data.get("students") or []
+    assignments = data.get("assignments") or []
+    if not students or not assignments:
+        print(
+            f"ERROR: refusing to overwrite the database with an empty scrape "
+            f"(students={len(students)}, assignments={len(assignments)}). "
+            "The scrape failed — check the login and re-run the sync.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Backup current database before overwriting
     _backup_database()
 
@@ -79,16 +104,6 @@ def load_scraped_data():
     info = verify_database()
     print(f"Tables: {info.get('tables', [])}")
     print(f"Views: {info.get('views', [])}")
-
-    # Load scraped data
-    data_file = Path(__file__).parent.parent / "raw_html" / "full_data.json"
-    if not data_file.exists():
-        print(f"ERROR: Data file not found: {data_file}")
-        print("Run scripts/scrape_full.py first")
-        sys.exit(1)
-
-    with open(data_file) as f:
-        data = json.load(f)
 
     repo = Repository()
     scrape_id = repo.start_scrape()

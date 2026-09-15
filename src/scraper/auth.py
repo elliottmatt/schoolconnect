@@ -60,6 +60,29 @@ def get_last_login_error() -> Optional[str]:
     return _LAST_LOGIN_ERROR
 
 
+def _is_authenticated(page: Page) -> bool:
+    """Check that the page is a signed-in guardian view, not the sign-in form.
+
+    Args:
+        page: Playwright page instance after submitting credentials
+
+    Returns:
+        True when the sign-in form is gone and the URL is a guardian page.
+    """
+    try:
+        url = page.url or ""
+    except Exception:
+        url = ""
+    if "/guardian/" not in url:
+        return False
+    try:
+        if page.query_selector("#fieldAccount") is not None:
+            return False  # sign-in form still present -> not authenticated
+    except Exception:
+        return False
+    return True
+
+
 def _login_alert_text(page: Page) -> str:
     """Read the PowerSchool error banner, if the login page is showing one.
 
@@ -173,6 +196,19 @@ def login(
             page.click("#btn-enter-sign-in")
 
             page.wait_for_url("**/guardian/**", timeout=timeout)
+
+            # A URL match alone is not proof of authentication. A rejected
+            # login (wrong credentials) can pass through /guardian/ on a
+            # redirect bounce and land back on the sign-in page, which used to
+            # be reported as "Login successful" — producing an empty scrape and
+            # an empty overwrite of the database.
+            if not _is_authenticated(page):
+                _LAST_LOGIN_ERROR = (
+                    _login_alert_text(page) or "portal returned to the sign-in page after submit"
+                )
+                logger.error("Login failed: %s", _LAST_LOGIN_ERROR)
+                return False
+
             logger.info("Login successful", extra={"extra_data": {"username": user}})
             return True
 

@@ -38,9 +38,17 @@ class _FakeElement:
 class _FakePage:
     """Minimal stand-in for a Playwright page positioned on the login form."""
 
-    def __init__(self, alert: str | None = EXPIRED_MESSAGE, fail: bool = True) -> None:
+    def __init__(
+        self,
+        alert: str | None = EXPIRED_MESSAGE,
+        fail: bool = True,
+        url: str = "https://example.test/guardian/home.html",
+        show_sign_in_form: bool = False,
+    ) -> None:
         self._alert = alert
         self._fail = fail
+        self.url = url
+        self._show_sign_in_form = show_sign_in_form
         self.filled: dict[str, str] = {}
 
     def goto(self, *_args, **_kwargs) -> None:
@@ -62,6 +70,8 @@ class _FakePage:
     def query_selector(self, selector: str):
         if selector == ".feedback-alert" and self._alert:
             return _FakeElement(self._alert)
+        if selector == "#fieldAccount" and self._show_sign_in_form:
+            return _FakeElement("")
         return None
 
 
@@ -125,3 +135,23 @@ def test_login_alert_text_ignores_blank_banner():
             return _FakeElement("   \n  ")
 
     assert _login_alert_text(_BlankPage()) == ""
+
+
+def test_login_url_match_alone_is_not_treated_as_success():
+    """A rejected login can bounce through /guardian/ and back to sign-in.
+
+    Regression: that bounce was reported as "Login successful", so the scraper
+    ran unauthenticated, returned zero rows, and the loader overwrote a
+    populated database with nothing.
+    """
+    page = _FakePage(fail=False, show_sign_in_form=True)
+
+    assert login(page, base_url="https://example.test", username="u", password="p") is False
+    assert get_last_login_error() == EXPIRED_MESSAGE
+
+
+def test_login_off_guardian_url_is_not_success():
+    page = _FakePage(fail=False, url="https://example.test/public/home.html", alert=None)
+
+    assert login(page, base_url="https://example.test", username="u", password="p") is False
+    assert get_last_login_error() is not None
