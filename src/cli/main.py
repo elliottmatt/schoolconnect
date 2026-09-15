@@ -396,7 +396,14 @@ def students(live: bool, headless: bool):
                 page = context.new_page()
 
                 if not login(page):
-                    console.print("[red]Login failed.[/red]")
+                    from src.scraper.auth import get_last_login_error
+
+                    reason = get_last_login_error()
+                    console.print(
+                        f"[red]Login failed.[/red] {reason}"
+                        if reason
+                        else "[red]Login failed.[/red]"
+                    )
                     browser.close()
                     return
 

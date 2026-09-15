@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from bs4 import BeautifulSoup
 from playwright.sync_api import Page, sync_playwright
 
-from src.scraper.auth import get_base_url, get_credentials, login
+from src.scraper.auth import get_base_url, get_credentials, get_last_login_error, login
 
 BASE_URL = get_base_url()
 RAW_HTML_DIR = Path(__file__).parent.parent / "raw_html"
@@ -102,7 +102,8 @@ def _ensure_logged_in(page: Page):
     if "Sign In" in page.title() or "/public/" in page.url:
         print("  Session expired, re-logging in...")
         if not login(page):
-            raise RuntimeError("Re-login failed after session expiry")
+            reason = get_last_login_error()
+            raise RuntimeError(f"Re-login failed after session expiry: {reason}" if reason else "Re-login failed after session expiry")
 
 
 def switch_student(page: Page, student_id: str):
@@ -654,6 +655,9 @@ def run_full_scrape(headless: bool = False, student_name: str | None = None, all
 
         if not login(page):
             browser.close()
+            reason = get_last_login_error()
+            if reason:
+                print(f"ERROR: PowerSchool login failed — {reason}", file=sys.stderr)
             sys.exit(1)
 
         if SCRAPER_DEBUG:
