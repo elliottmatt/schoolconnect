@@ -31,6 +31,84 @@ class AuthenticationError(Exception):
     pass
 
 
+# Human-readable reason for the most recent login failure.
+#
+# Log formatters do not render ``extra_data``, so the portal's own error text
+# ("Your password has been expired. Create a new password.") used to be lost:
+# the sync watchdog reported only "Login failed" and the operator had to
+# reproduce the login by hand to learn why. Carrying the reason in the log
+# message itself (and in this module state) makes it reach the console, the
+# cron job's captured stderr, and the Discord DM.
+_LAST_LOGIN_ERROR: Optional[str] = None
+
+# Selectors for the portal's error banner, most specific first.
+_LOGIN_ALERT_SELECTORS = (
+    ".feedback-alert",
+    "[role=alert]",
+    ".error-message",
+    "#errorMessage",
+)
+
+
+def get_last_login_error() -> Optional[str]:
+    """Return the human-readable reason for the most recent login failure.
+
+    Returns:
+        The portal's own error text if it displayed one, else the underlying
+        exception string. None when the last login attempt succeeded.
+    """
+    return _LAST_LOGIN_ERROR
+
+
+def _is_authenticated(page: Page) -> bool:
+    """Check that the page is a signed-in guardian view, not the sign-in form.
+
+    Args:
+        page: Playwright page instance after submitting credentials
+
+    Returns:
+        True when the sign-in form is gone and the URL is a guardian page.
+    """
+    try:
+        url = page.url or ""
+    except Exception:
+        url = ""
+    if "/guardian/" not in url:
+        return False
+    try:
+        if page.query_selector("#fieldAccount") is not None:
+            return False  # sign-in form still present -> not authenticated
+    except Exception:
+        return False
+    return True
+
+
+def _login_alert_text(page: Page) -> str:
+    """Read the PowerSchool error banner, if the login page is showing one.
+
+    Args:
+        page: Playwright page instance, positioned on the login page
+
+    Returns:
+        Whitespace-normalised banner text, or "" when no banner is present.
+    """
+    for selector in _LOGIN_ALERT_SELECTORS:
+        try:
+            element = page.query_selector(selector)
+        except Exception:
+            continue
+        if element is None:
+            continue
+        try:
+            text = element.inner_text() or ""
+        except Exception:
+            continue
+        text = " ".join(text.split())
+        if text:
+            return text
+    return ""
+
+
 def get_base_url() -> str:
     """Get the PowerSchool base URL from environment.
 
@@ -94,6 +172,9 @@ def login(
     user = username or USERNAME
     pwd = password or PASSWORD
 
+    global _LAST_LOGIN_ERROR
+    _LAST_LOGIN_ERROR = None
+
     if not user or not pwd:
         logger.error("Missing credentials for PowerSchool login")
         return False
@@ -115,17 +196,38 @@ def login(
             page.click("#btn-enter-sign-in")
 
             page.wait_for_url("**/guardian/**", timeout=timeout)
+
+            # A URL match alone is not proof of authentication. A rejected
+            # login (wrong credentials) can pass through /guardian/ on a
+            # redirect bounce and land back on the sign-in page, which used to
+            # be reported as "Login successful" — producing an empty scrape and
+            # an empty overwrite of the database.
+            if not _is_authenticated(page):
+                _LAST_LOGIN_ERROR = (
+                    _login_alert_text(page) or "portal returned to the sign-in page after submit"
+                )
+                logger.error("Login failed: %s", _LAST_LOGIN_ERROR)
+                return False
+
             logger.info("Login successful", extra={"extra_data": {"username": user}})
             return True
 
     except Exception as e:
-        logger.error("Login failed", extra={"extra_data": {"error": str(e)}}, exc_info=True)
-        # Check for error message on page
-        error = page.query_selector(".feedback-alert")
-        if error:
+        reason = _login_alert_text(page)
+        _LAST_LOGIN_ERROR = reason or str(e)
+        # Reason goes in the MESSAGE (formatters drop extra_data) so the cron
+        # job's captured stderr — and therefore the alert DM — says why.
+        logger.error("Login failed: %s", _LAST_LOGIN_ERROR)
+        if reason:
             logger.warning(
                 "Login error message displayed",
-                extra={"extra_data": {"message": error.inner_text()}},
+                extra={"extra_data": {"message": reason}},
+            )
+        if "expired" in _LAST_LOGIN_ERROR.lower():
+            logger.error(
+                "PowerSchool password expired — reset it at %s/public/home.html, "
+                "update POWERSCHOOL_PASSWORD in .env, then re-run the sync.",
+                url,
             )
         return False
 
@@ -152,7 +254,12 @@ def login_or_raise(
         AuthenticationError: If login fails
     """
     if not login(page, base_url, username, password, timeout, verbose):
-        raise AuthenticationError("Failed to login to PowerSchool")
+        reason = get_last_login_error()
+        raise AuthenticationError(
+            f"Failed to login to PowerSchool: {reason}"
+            if reason
+            else "Failed to login to PowerSchool"
+        )
 
 
 # =============================================================================
